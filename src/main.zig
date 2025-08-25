@@ -13,8 +13,13 @@ pub fn main() !void {
 
     while (true) {
         const char = stdin.takeByte() catch break;
-        if (char == 'q') break;
-        std.debug.print("{c}", .{char});
+        switch (char) {
+            'q' => break,
+            else => if (std.ascii.isPrint(char))
+                std.debug.print("{d} ('{c}')\n", .{ char, char })
+            else
+                std.debug.print("{d}\n", .{char}),
+        }
     }
 }
 
@@ -23,6 +28,7 @@ fn enableRawMode() !void {
 
     var raw = original_termios;
     raw.lflag.ECHO = false;
+    raw.lflag.ICANON = false;
     try posix.tcsetattr(posix.STDIN_FILENO, .FLUSH, raw);
 }
 
