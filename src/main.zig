@@ -1,71 +1,26 @@
 const std = @import("std");
 const posix = std.posix;
+const stdio = @import("stdio.zig");
+const Editor = @import("Editor.zig");
 
-const clear_screen = "\x1b[2J";
-const cursor_top = "\x1b[H";
-
-var stdin_buffer: [1024]u8 = undefined;
-var stdin_reader = std.fs.File.stdin().reader(&stdin_buffer);
-const stdin = &stdin_reader.interface;
-
-var stdout_buffer: [1024]u8 = undefined;
-var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-const stdout = &stdout_writer.interface;
+const stdin = stdio.stdin;
+const stdout = stdio.stdout;
 
 var original_termios: posix.termios = undefined;
 
 pub fn main() !void {
-    defer editorClearScreen() catch {};
+    var editor: Editor = .init();
+
+    defer editor.clearScreen() catch {};
 
     try enableRawMode();
     defer disableRawMode() catch {};
 
     var quit = false;
     while (!quit) {
-        try editorRefreshScreen();
-        quit = try editorProcessKeypress();
+        try editor.refreshScreen();
+        quit = try editor.processKeypress();
     }
-}
-
-fn editorDrawRows() !void {
-    for (0..24) |_| {
-        try stdout.writeAll("~\r\n");
-    }
-    try stdout.flush();
-}
-
-fn editorClearScreen() !void {
-    try stdout.writeAll(clear_screen);
-    try stdout.writeAll(cursor_top);
-    try stdout.flush();
-}
-
-fn editorRefreshScreen() !void {
-    try editorClearScreen();
-    try editorDrawRows();
-    try stdout.writeAll(cursor_top);
-    try stdout.flush();
-}
-
-fn editorReadKey() !u8 {
-    return stdin.takeByte() catch |err| blk: {
-        break :blk switch (err) {
-            error.ReadFailed => err,
-            else => @as(u8, 0),
-        };
-    };
-}
-
-fn editorProcessKeypress() !bool {
-    const char = try editorReadKey();
-    return switch (char) {
-        ctrlKey('q') => true,
-        else => false,
-    };
-}
-
-fn ctrlKey(key: u8) u8 {
-    return key & 0x1f;
 }
 
 fn enableRawMode() !void {
