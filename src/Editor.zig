@@ -31,9 +31,15 @@ pub const Screen = struct {
     cols: u32,
 };
 
+const Pos = struct {
+    x: u32,
+    y: u32,
+};
+
 allocator: std.mem.Allocator,
 append_buffer: std.ArrayList(u8),
 screen: Screen,
+cursor: Pos,
 
 pub fn init(allocator: std.mem.Allocator) !Editor {
     const winsize: linux.WinSize = linux.getWindowSize() catch blk: {
@@ -55,6 +61,7 @@ pub fn init(allocator: std.mem.Allocator) !Editor {
             .rows = winsize.rows,
             .cols = winsize.cols,
         },
+        .cursor = .{ .x = 0, .y = 0 },
     };
 }
 
@@ -70,7 +77,8 @@ pub fn clearScreen(_: *const Editor) !void {
 pub fn refreshScreen(self: *Editor) !void {
     try self.append_buffer.appendSlice(self.allocator, Ansi.cursor_hide ++ Ansi.cursor_top);
     try self.drawRows();
-    try self.append_buffer.appendSlice(self.allocator, Ansi.cursor_top ++ Ansi.cursor_show);
+    try self.append_buffer.print(self.allocator, Ansi.esc ++ "[{d};{d}H", .{ self.cursor.y + 1, self.cursor.x + 1 });
+    try self.append_buffer.appendSlice(self.allocator, Ansi.cursor_show);
 
     try stdout.writeAll(self.append_buffer.items);
     try stdout.flush();
@@ -78,11 +86,15 @@ pub fn refreshScreen(self: *Editor) !void {
     self.append_buffer.clearRetainingCapacity();
 }
 
-pub fn processKeypress(_: *const Editor) !bool {
+pub fn processKeypress(self: *Editor, quit: *bool) !void {
     const char = try readKey();
     return switch (char) {
-        ctrlKey('q') => true,
-        else => false,
+        ctrlKey('q') => quit.* = true,
+        'a' => self.cursor.x -|= 1,
+        'd' => self.cursor.x += 1,
+        'w' => self.cursor.y -|= 1,
+        's' => self.cursor.y += 1,
+        else => {},
     };
 }
 

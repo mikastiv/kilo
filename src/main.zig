@@ -22,6 +22,6 @@ pub fn main() !void {
     var quit = false;
     while (!quit) {
         try editor.refreshScreen();
-        quit = try editor.processKeypress();
+        try editor.processKeypress(&quit);
     }
 }
