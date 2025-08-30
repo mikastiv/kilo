@@ -16,14 +16,15 @@ const stdout = stdio.stdout;
 
 const Ansi = struct {
     const esc = "\x1b";
-    const clear_screen = esc ++ "[2J";
-    const clear_line = esc ++ "[K";
-    const cursor_top = esc ++ "[H";
-    const cursor_bottom = esc ++ "[999C";
-    const cursor_right = esc ++ "[999B";
-    const cursor_position = esc ++ "[6n";
-    const cursor_hide = esc ++ "[?25l";
-    const cursor_show = esc ++ "[?25h";
+    const esc_seq = esc ++ "[";
+    const clear_screen = esc_seq ++ "2J";
+    const clear_line = esc_seq ++ "K";
+    const cursor_top = esc_seq ++ "H";
+    const cursor_bottom = esc_seq ++ "999C";
+    const cursor_right = esc_seq ++ "999B";
+    const cursor_position = esc_seq ++ "6n";
+    const cursor_hide = esc_seq ++ "?25l";
+    const cursor_show = esc_seq ++ "?25h";
 };
 
 pub const Screen = struct {
@@ -34,6 +35,15 @@ pub const Screen = struct {
 const Pos = struct {
     x: u32,
     y: u32,
+};
+
+const Key = enum(u8) {
+    ctrl_q = 'q' & 0x1f,
+    left = 128,
+    right = 129,
+    up = 130,
+    down = 131,
+    _,
 };
 
 allocator: std.mem.Allocator,
@@ -77,7 +87,7 @@ pub fn clearScreen(_: *const Editor) !void {
 pub fn refreshScreen(self: *Editor) !void {
     try self.append_buffer.appendSlice(self.allocator, Ansi.cursor_hide ++ Ansi.cursor_top);
     try self.drawRows();
-    try self.append_buffer.print(self.allocator, Ansi.esc ++ "[{d};{d}H", .{ self.cursor.y + 1, self.cursor.x + 1 });
+    try self.append_buffer.print(self.allocator, Ansi.esc_seq ++ "{d};{d}H", .{ self.cursor.y + 1, self.cursor.x + 1 });
     try self.append_buffer.appendSlice(self.allocator, Ansi.cursor_show);
 
     try stdout.writeAll(self.append_buffer.items);
@@ -89,13 +99,24 @@ pub fn refreshScreen(self: *Editor) !void {
 pub fn processKeypress(self: *Editor, quit: *bool) !void {
     const char = try readKey();
     return switch (char) {
-        ctrlKey('q') => quit.* = true,
-        'a' => self.cursor.x -|= 1,
-        'd' => self.cursor.x += 1,
-        'w' => self.cursor.y -|= 1,
-        's' => self.cursor.y += 1,
+        .ctrl_q => quit.* = true,
+        .left, .right, .up, .down => self.moveCursor(char),
         else => {},
     };
+}
+
+fn moveCursor(self: *Editor, char: Key) void {
+    switch (char) {
+        .left => self.cursor.x -|= 1,
+        .right => if (self.cursor.x < self.screen.cols - 1) {
+            self.cursor.x += 1;
+        },
+        .up => self.cursor.y -|= 1,
+        .down => if (self.cursor.y < self.screen.rows - 1) {
+            self.cursor.y += 1;
+        },
+        else => {},
+    }
 }
 
 fn drawRows(self: *Editor) !void {
@@ -123,20 +144,32 @@ fn drawRows(self: *Editor) !void {
     }
 }
 
-fn readKey() !u8 {
+fn readKey() !Key {
     while (true) {
         const char = stdin.takeByte() catch |err| blk: {
             break :blk switch (err) {
-                error.ReadFailed => err,
+                error.ReadFailed => return err,
                 error.EndOfStream => continue,
             };
         };
-        return char;
-    }
-}
 
-fn ctrlKey(key: u8) u8 {
-    return key & 0x1f;
+        if (char == Ansi.esc_seq[0]) {
+            const brkt = try stdin.takeByte();
+            const cmd = try stdin.takeByte();
+
+            if (brkt == Ansi.esc_seq[1]) {
+                switch (cmd) {
+                    'A' => return .up,
+                    'B' => return .down,
+                    'C' => return .right,
+                    'D' => return .left,
+                    else => {},
+                }
+            }
+        }
+
+        return @enumFromInt(char);
+    }
 }
 
 fn getCursorPosition() !Screen {
@@ -156,9 +189,9 @@ fn getCursorPosition() !Screen {
         try array.appendBounded(char);
     }
 
-    if (array.items[0] != Ansi.esc[0] or array.items[1] != '[') return error.InvalidCursorPosition;
+    if (!std.mem.eql(u8, array.items[0..Ansi.esc_seq.len], Ansi.esc_seq)) return error.InvalidCursorPosition;
 
-    const cursor_pos_raw = array.items[2..];
+    const cursor_pos_raw = array.items[Ansi.esc_seq.len..];
     const rows_raw = std.mem.sliceTo(cursor_pos_raw, ';');
     const cols_raw = cursor_pos_raw[rows_raw.len + 1 ..];
 
