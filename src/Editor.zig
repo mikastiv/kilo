@@ -43,6 +43,11 @@ const Key = enum(u8) {
     right = 129,
     up = 130,
     down = 131,
+    page_up = 132,
+    page_down = 133,
+    home = 134,
+    end = 135,
+    delete = 136,
     _,
 };
 
@@ -99,8 +104,17 @@ pub fn refreshScreen(self: *Editor) !void {
 pub fn processKeypress(self: *Editor, quit: *bool) !void {
     const char = try readKey();
     return switch (char) {
-        .ctrl_q => quit.* = true,
+        .ctrl_q => {
+            quit.* = true;
+            try stdout.writeAll(Ansi.clear_screen ++ Ansi.cursor_top);
+            try stdout.flush();
+        },
         .left, .right, .up, .down => self.moveCursor(char),
+        .page_up, .page_down => for (0..self.screen.rows) |_| {
+            self.moveCursor(if (char == .page_up) .up else .down);
+        },
+        .home => self.cursor.x = 0,
+        .end => self.cursor.x = self.screen.cols - 1,
         else => {},
     };
 }
@@ -154,17 +168,41 @@ fn readKey() !Key {
         };
 
         if (char == Ansi.esc_seq[0]) {
-            const brkt = try stdin.takeByte();
-            const cmd = try stdin.takeByte();
+            var seq: [3]u8 = undefined;
+            seq[0] = stdin.takeByte() catch return @enumFromInt(Ansi.esc[0]);
+            seq[1] = stdin.takeByte() catch return @enumFromInt(Ansi.esc[0]);
 
-            if (brkt == Ansi.esc_seq[1]) {
-                switch (cmd) {
-                    'A' => return .up,
-                    'B' => return .down,
-                    'C' => return .right,
-                    'D' => return .left,
+            switch (seq[0]) {
+                '[' => switch (seq[1]) {
+                    '0'...'9' => {
+                        seq[2] = try stdin.takeByte();
+                        if (seq[2] == '~') {
+                            switch (seq[1]) {
+                                '1', '7' => return .home,
+                                '3' => return .delete,
+                                '4', '8' => return .end,
+                                '5' => return .page_up,
+                                '6' => return .page_down,
+                                else => {},
+                            }
+                        }
+                    },
+                    else => switch (seq[1]) {
+                        'A' => return .up,
+                        'B' => return .down,
+                        'C' => return .right,
+                        'D' => return .left,
+                        'F' => return .end,
+                        'H' => return .home,
+                        else => {},
+                    },
+                },
+                'O' => switch (seq[1]) {
+                    'F' => return .end,
+                    'H' => return .home,
                     else => {},
-                }
+                },
+                else => return @enumFromInt(Ansi.esc_seq[0]),
             }
         }
 
