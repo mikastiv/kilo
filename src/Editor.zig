@@ -55,8 +55,7 @@ allocator: std.mem.Allocator,
 append_buffer: std.ArrayList(u8),
 screen: Screen,
 cursor: Pos,
-row_count: u32,
-row: std.ArrayList(u8),
+rows: std.ArrayList(std.ArrayList(u8)),
 
 pub fn init(allocator: std.mem.Allocator) !Editor {
     const winsize: linux.WinSize = linux.getWindowSize() catch blk: {
@@ -79,8 +78,7 @@ pub fn init(allocator: std.mem.Allocator) !Editor {
             .cols = winsize.cols,
         },
         .cursor = .{ .x = 0, .y = 0 },
-        .row_count = 0,
-        .row = .empty,
+        .rows = .empty,
     };
 }
 
@@ -134,10 +132,17 @@ pub fn openFile(self: *Editor, filename: []const u8) !void {
     var write_buffer: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&write_buffer);
 
-    _ = try reader.streamDelimiter(&writer, '\n');
-    self.row.clearRetainingCapacity();
-    try self.row.appendSlice(self.allocator, writer.buffered());
-    self.row_count = 1;
+    while (reader.streamDelimiter(&writer, '\n')) |_| {
+        try self.appendRow(writer.buffered());
+        _ = writer.consumeAll();
+        reader.toss(1);
+    } else |err| if (err != error.EndOfStream) return err;
+}
+
+fn appendRow(self: *Editor, str: []const u8) !void {
+    const index = self.rows.items.len;
+    try self.rows.append(self.allocator, .empty);
+    try self.rows.items[index].appendSlice(self.allocator, str);
 }
 
 fn moveCursor(self: *Editor, char: Key) void {
@@ -156,8 +161,8 @@ fn moveCursor(self: *Editor, char: Key) void {
 
 fn drawRows(self: *Editor) !void {
     for (0..self.screen.rows) |y| {
-        if (y >= self.row_count) {
-            if (self.row_count == 0 and y == self.screen.rows / 3) {
+        if (y >= self.rows.items.len) {
+            if (self.rows.items.len == 0 and y == self.screen.rows / 3) {
                 var buf: [64]u8 = undefined;
                 const welcome = try std.fmt.bufPrint(&buf, "Kilo editor -- version {f}", .{version});
 
@@ -173,8 +178,8 @@ fn drawRows(self: *Editor) !void {
                 try self.append_buffer.append(self.allocator, '~');
             }
         } else {
-            const len = self.row.items.len;
-            const row = self.row.items[0..@min(len, self.screen.cols)];
+            const len = self.rows.items[y].items.len;
+            const row = self.rows.items[y].items[0..@min(len, self.screen.cols)];
             try self.append_buffer.appendSlice(self.allocator, row);
         }
 
