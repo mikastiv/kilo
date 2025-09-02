@@ -55,6 +55,8 @@ allocator: std.mem.Allocator,
 append_buffer: std.ArrayList(u8),
 screen: Screen,
 cursor: Pos,
+row_count: u32,
+row: std.ArrayList(u8),
 
 pub fn init(allocator: std.mem.Allocator) !Editor {
     const winsize: linux.WinSize = linux.getWindowSize() catch blk: {
@@ -77,6 +79,8 @@ pub fn init(allocator: std.mem.Allocator) !Editor {
             .cols = winsize.cols,
         },
         .cursor = .{ .x = 0, .y = 0 },
+        .row_count = 0,
+        .row = .empty,
     };
 }
 
@@ -119,6 +123,23 @@ pub fn processKeypress(self: *Editor, quit: *bool) !void {
     };
 }
 
+pub fn openFile(self: *Editor, filename: []const u8) !void {
+    const file = try std.fs.cwd().openFile(filename, .{ .mode = .read_only });
+    defer file.close();
+
+    var file_buffer: [512]u8 = undefined;
+    var file_reader = file.reader(&file_buffer);
+    const reader = &file_reader.interface;
+
+    var write_buffer: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&write_buffer);
+
+    _ = try reader.streamDelimiter(&writer, '\n');
+    self.row.clearRetainingCapacity();
+    try self.row.appendSlice(self.allocator, writer.buffered());
+    self.row_count = 1;
+}
+
 fn moveCursor(self: *Editor, char: Key) void {
     switch (char) {
         .left => self.cursor.x -|= 1,
@@ -135,20 +156,26 @@ fn moveCursor(self: *Editor, char: Key) void {
 
 fn drawRows(self: *Editor) !void {
     for (0..self.screen.rows) |y| {
-        if (y == self.screen.rows / 3) {
-            var buf: [64]u8 = undefined;
-            const welcome = try std.fmt.bufPrint(&buf, "Kilo editor -- version {f}", .{version});
+        if (y >= self.row_count) {
+            if (self.row_count == 0 and y == self.screen.rows / 3) {
+                var buf: [64]u8 = undefined;
+                const welcome = try std.fmt.bufPrint(&buf, "Kilo editor -- version {f}", .{version});
 
-            var padding = (self.screen.cols - welcome.len) / 2;
-            if (padding > 0) {
+                var padding = (self.screen.cols - welcome.len) / 2;
+                if (padding > 0) {
+                    try self.append_buffer.append(self.allocator, '~');
+                    padding -= 1;
+                }
+
+                try self.append_buffer.appendNTimes(self.allocator, ' ', padding);
+                try self.append_buffer.appendSlice(self.allocator, welcome);
+            } else {
                 try self.append_buffer.append(self.allocator, '~');
-                padding -= 1;
             }
-
-            try self.append_buffer.appendNTimes(self.allocator, ' ', padding);
-            try self.append_buffer.appendSlice(self.allocator, welcome);
         } else {
-            try self.append_buffer.append(self.allocator, '~');
+            const len = self.row.items.len;
+            const row = self.row.items[0..@min(len, self.screen.cols)];
+            try self.append_buffer.appendSlice(self.allocator, row);
         }
 
         try self.append_buffer.appendSlice(self.allocator, Ansi.clear_line);

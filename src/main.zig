@@ -10,12 +10,18 @@ const stdout = stdio.stdout;
 var original_termios: posix.termios = undefined;
 
 pub fn main() !void {
-    const alloc = std.heap.smp_allocator;
+    const allocator = std.heap.smp_allocator;
+
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
 
     original_termios = try linux.enableRawMode();
     defer linux.disableRawMode(original_termios) catch {};
 
-    var editor: Editor = try .init(alloc);
+    var editor: Editor = try .init(allocator);
+    if (args.len > 1) {
+        try editor.openFile(args[1]);
+    }
 
     defer editor.clearScreen() catch {};
 
