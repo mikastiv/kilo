@@ -56,6 +56,8 @@ append_buffer: std.ArrayList(u8),
 screen: Screen,
 cursor: Pos,
 rows: std.ArrayList(std.ArrayList(u8)),
+row_offset: u32,
+col_offset: u32,
 
 pub fn init(allocator: std.mem.Allocator) !Editor {
     const winsize: linux.WinSize = linux.getWindowSize() catch blk: {
@@ -79,11 +81,17 @@ pub fn init(allocator: std.mem.Allocator) !Editor {
         },
         .cursor = .{ .x = 0, .y = 0 },
         .rows = .empty,
+        .row_offset = 0,
+        .col_offset = 0,
     };
 }
 
 pub fn deinit(self: *Editor) void {
     self.append_buffer.deinit(self.allocator);
+    for (self.rows.items) |*row| {
+        row.deinit(self.allocator);
+    }
+    self.rows.deinit(self.allocator);
 }
 
 pub fn clearScreen(_: *const Editor) !void {
@@ -92,9 +100,11 @@ pub fn clearScreen(_: *const Editor) !void {
 }
 
 pub fn refreshScreen(self: *Editor) !void {
+    self.scroll();
+
     try self.append_buffer.appendSlice(self.allocator, Ansi.cursor_hide ++ Ansi.cursor_top);
     try self.drawRows();
-    try self.append_buffer.print(self.allocator, Ansi.esc_seq ++ "{d};{d}H", .{ self.cursor.y + 1, self.cursor.x + 1 });
+    try self.append_buffer.print(self.allocator, Ansi.esc_seq ++ "{d};{d}H", .{ (self.cursor.y - self.row_offset) + 1, (self.cursor.x - self.col_offset) + 1 });
     try self.append_buffer.appendSlice(self.allocator, Ansi.cursor_show);
 
     try stdout.writeAll(self.append_buffer.items);
@@ -148,20 +158,37 @@ fn appendRow(self: *Editor, str: []const u8) !void {
 fn moveCursor(self: *Editor, char: Key) void {
     switch (char) {
         .left => self.cursor.x -|= 1,
-        .right => if (self.cursor.x < self.screen.cols - 1) {
-            self.cursor.x += 1;
-        },
+        .right => self.cursor.x += 1,
         .up => self.cursor.y -|= 1,
-        .down => if (self.cursor.y < self.screen.rows - 1) {
+        .down => if (self.cursor.y < self.rows.items.len) {
             self.cursor.y += 1;
         },
         else => {},
     }
 }
 
+fn scroll(self: *Editor) void {
+    if (self.cursor.y < self.row_offset) {
+        self.row_offset = self.cursor.y;
+    }
+
+    if (self.cursor.y >= self.row_offset + self.screen.rows) {
+        self.row_offset = self.cursor.y - self.screen.rows + 1;
+    }
+
+    if (self.cursor.x < self.col_offset) {
+        self.col_offset = self.cursor.x;
+    }
+
+    if (self.cursor.x >= self.col_offset + self.screen.cols) {
+        self.col_offset = self.cursor.x - self.screen.cols + 1;
+    }
+}
+
 fn drawRows(self: *Editor) !void {
     for (0..self.screen.rows) |y| {
-        if (y >= self.rows.items.len) {
+        const file_row = y + self.row_offset;
+        if (file_row >= self.rows.items.len) {
             if (self.rows.items.len == 0 and y == self.screen.rows / 3) {
                 var buf: [64]u8 = undefined;
                 const welcome = try std.fmt.bufPrint(&buf, "Kilo editor -- version {f}", .{version});
@@ -178,8 +205,10 @@ fn drawRows(self: *Editor) !void {
                 try self.append_buffer.append(self.allocator, '~');
             }
         } else {
-            const len = self.rows.items[y].items.len;
-            const row = self.rows.items[y].items[0..@min(len, self.screen.cols)];
+            var len = self.rows.items[file_row].items.len -| self.col_offset;
+            len = @min(len, self.screen.cols);
+            const index = @min(self.col_offset, self.rows.items[file_row].items.len);
+            const row = self.rows.items[file_row].items[index .. index + len];
             try self.append_buffer.appendSlice(self.allocator, row);
         }
 
