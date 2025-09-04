@@ -34,8 +34,8 @@ pub fn disableRawMode(original_termios: posix.termios) !void {
 }
 
 pub const WinSize = struct {
-    rows: u32,
-    cols: u32,
+    rows: usize,
+    cols: usize,
 };
 
 pub fn getWindowSize() !WinSize {
