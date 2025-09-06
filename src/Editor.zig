@@ -6,6 +6,8 @@ const version: std.SemanticVersion = .{
     .patch = 1,
 };
 
+const tab_stop = 8;
+
 const std = @import("std");
 const stdio = @import("stdio.zig");
 const linux = @import("linux.zig");
@@ -51,11 +53,29 @@ const Key = enum(u8) {
     _,
 };
 
+const Row = struct {
+    chars: std.ArrayList(u8),
+    render: std.ArrayList(u8),
+
+    fn update(self: *Row, allocator: std.mem.Allocator) !void {
+        self.render.clearRetainingCapacity();
+
+        for (self.chars.items) |char| {
+            if (char == '\t') {
+                const count = tab_stop - (self.render.items.len % tab_stop);
+                try self.render.appendNTimes(allocator, ' ', count);
+            } else {
+                try self.render.append(allocator, char);
+            }
+        }
+    }
+};
+
 allocator: std.mem.Allocator,
 append_buffer: std.ArrayList(u8),
 screen: Screen,
 cursor: Pos,
-rows: std.ArrayList(std.ArrayList(u8)),
+rows: std.ArrayList(Row),
 row_offset: usize,
 col_offset: usize,
 
@@ -89,7 +109,8 @@ pub fn init(allocator: std.mem.Allocator) !Editor {
 pub fn deinit(self: *Editor) void {
     self.append_buffer.deinit(self.allocator);
     for (self.rows.items) |*row| {
-        row.deinit(self.allocator);
+        row.chars.deinit(self.allocator);
+        row.render.deinit(self.allocator);
     }
     self.rows.deinit(self.allocator);
 }
@@ -154,11 +175,14 @@ pub fn openFile(self: *Editor, filename: []const u8) !void {
 
 fn appendRow(self: *Editor, str: []const u8) !void {
     const index = self.rows.items.len;
-    try self.rows.append(self.allocator, .empty);
-    try self.rows.items[index].appendSlice(self.allocator, str);
+    try self.rows.append(self.allocator, .{ .chars = .empty, .render = .empty });
+
+    const row = &self.rows.items[index];
+    try row.chars.appendSlice(self.allocator, str);
+    try row.update(self.allocator);
 }
 
-fn currentRow(self: *const Editor) ?*std.ArrayList(u8) {
+fn currentRow(self: *const Editor) ?*Row {
     return switch (self.cursor.y >= self.rows.items.len) {
         true => null,
         false => &self.rows.items[self.cursor.y],
@@ -173,12 +197,12 @@ fn moveCursor(self: *Editor, char: Key) void {
             self.cursor.x -= 1;
         } else if (self.cursor.y > 0) {
             self.cursor.y -= 1;
-            self.cursor.x = self.currentRow().?.items.len;
+            self.cursor.x = if (self.currentRow()) |row| row.chars.items.len else 0;
         },
         .right => if (current_row) |row| {
-            if (self.cursor.x < row.items.len) {
+            if (self.cursor.x < row.chars.items.len) {
                 self.cursor.x += 1;
-            } else if (self.cursor.x == row.items.len) {
+            } else if (self.cursor.x == row.chars.items.len) {
                 self.cursor.y += 1;
                 self.cursor.x = 0;
             }
@@ -191,7 +215,7 @@ fn moveCursor(self: *Editor, char: Key) void {
     }
 
     current_row = self.currentRow();
-    const row_len = if (current_row) |row| row.items.len else 0;
+    const row_len = if (current_row) |row| row.chars.items.len else 0;
     if (self.cursor.x > row_len) self.cursor.x = row_len;
 }
 
@@ -233,11 +257,11 @@ fn drawRows(self: *Editor) !void {
                 try self.append_buffer.append(self.allocator, '~');
             }
         } else {
-            var len = self.rows.items[file_row].items.len -| self.col_offset;
-            len = @min(len, self.screen.cols);
-            const index = @min(self.col_offset, self.rows.items[file_row].items.len);
-            const row = self.rows.items[file_row].items[index .. index + len];
-            try self.append_buffer.appendSlice(self.allocator, row);
+            const row = &self.rows.items[file_row];
+            const len = @min(row.render.items.len -| self.col_offset, self.screen.cols);
+            const index = @min(self.col_offset, row.render.items.len);
+            const line = row.render.items[index .. index + len];
+            try self.append_buffer.appendSlice(self.allocator, line);
         }
 
         try self.append_buffer.appendSlice(self.allocator, Ansi.clear_line);
