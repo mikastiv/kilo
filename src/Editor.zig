@@ -27,6 +27,8 @@ const Ansi = struct {
     const cursor_position = esc_seq ++ "6n";
     const cursor_hide = esc_seq ++ "?25l";
     const cursor_show = esc_seq ++ "?25h";
+    const invert_colors = esc_seq ++ "7m";
+    const normal_colors = esc_seq ++ "m";
 };
 
 pub const Screen = struct {
@@ -90,6 +92,7 @@ rx: usize,
 rows: std.ArrayList(Row),
 row_offset: usize,
 col_offset: usize,
+filename: ?[]const u8,
 
 pub fn init(allocator: std.mem.Allocator) !Editor {
     const winsize: linux.WinSize = linux.getWindowSize() catch blk: {
@@ -108,7 +111,7 @@ pub fn init(allocator: std.mem.Allocator) !Editor {
         .allocator = allocator,
         .append_buffer = .empty,
         .screen = .{
-            .rows = winsize.rows,
+            .rows = winsize.rows -| 1,
             .cols = winsize.cols,
         },
         .cursor = .{ .x = 0, .y = 0 },
@@ -116,6 +119,7 @@ pub fn init(allocator: std.mem.Allocator) !Editor {
         .rows = .empty,
         .row_offset = 0,
         .col_offset = 0,
+        .filename = null,
     };
 }
 
@@ -137,11 +141,15 @@ pub fn refreshScreen(self: *Editor) !void {
     self.scroll();
 
     try self.append_buffer.appendSlice(self.allocator, Ansi.cursor_hide ++ Ansi.cursor_top);
+
     try self.drawRows();
+    try self.drawStatusBar();
+
     try self.append_buffer.print(self.allocator, Ansi.esc_seq ++ "{d};{d}H", .{
         (self.cursor.y - self.row_offset) + 1,
         (self.rx - self.col_offset) + 1,
     });
+
     try self.append_buffer.appendSlice(self.allocator, Ansi.cursor_show);
 
     try stdout.writeAll(self.append_buffer.items);
@@ -181,6 +189,7 @@ pub fn processKeypress(self: *Editor, quit: *bool) !void {
 }
 
 pub fn openFile(self: *Editor, filename: []const u8) !void {
+    self.filename = filename;
     const file = try std.fs.cwd().openFile(filename, .{ .mode = .read_only });
     defer file.close();
 
@@ -295,10 +304,41 @@ fn drawRows(self: *Editor) !void {
         }
 
         try self.append_buffer.appendSlice(self.allocator, Ansi.clear_line);
-        if (y < self.screen.rows - 1) {
-            try self.append_buffer.appendSlice(self.allocator, "\r\n");
-        }
+        try self.append_buffer.appendSlice(self.allocator, "\r\n");
     }
+}
+
+fn drawStatusBar(self: *Editor) !void {
+    try self.append_buffer.appendSlice(self.allocator, Ansi.invert_colors);
+
+    var left_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const left_str = try std.fmt.bufPrint(
+        &left_buffer,
+        " {s} - {d} lines",
+        .{ self.filename orelse "[No Name]", self.rows.items.len },
+    );
+    const left_status = left_str[0..@min(left_str.len, self.screen.cols)];
+
+    var right_buffer: [64]u8 = undefined;
+    const right_status = try std.fmt.bufPrint(
+        &right_buffer,
+        "{d}/{d} ",
+        .{ self.cursor.y + 1, self.rows.items.len },
+    );
+
+    try self.append_buffer.appendSlice(self.allocator, left_status);
+    if (self.screen.cols >= left_status.len + right_status.len + 1) {
+        try self.append_buffer.appendNTimes(
+            self.allocator,
+            ' ',
+            self.screen.cols -| left_status.len -| right_status.len,
+        );
+        try self.append_buffer.appendSlice(self.allocator, right_status);
+    } else {
+        try self.append_buffer.appendNTimes(self.allocator, ' ', self.screen.cols -| left_status.len);
+    }
+
+    try self.append_buffer.appendSlice(self.allocator, Ansi.normal_colors);
 }
 
 fn readKey() !Key {
