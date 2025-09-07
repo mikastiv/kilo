@@ -93,6 +93,9 @@ rows: std.ArrayList(Row),
 row_offset: usize,
 col_offset: usize,
 filename: ?[]const u8,
+status_msg_buffer: [64]u8,
+status_msg: []const u8,
+status_msg_time: i64,
 
 pub fn init(allocator: std.mem.Allocator) !Editor {
     const winsize: linux.WinSize = linux.getWindowSize() catch blk: {
@@ -111,7 +114,7 @@ pub fn init(allocator: std.mem.Allocator) !Editor {
         .allocator = allocator,
         .append_buffer = .empty,
         .screen = .{
-            .rows = winsize.rows -| 1,
+            .rows = winsize.rows -| 2,
             .cols = winsize.cols,
         },
         .cursor = .{ .x = 0, .y = 0 },
@@ -120,6 +123,9 @@ pub fn init(allocator: std.mem.Allocator) !Editor {
         .row_offset = 0,
         .col_offset = 0,
         .filename = null,
+        .status_msg_buffer = undefined,
+        .status_msg = "",
+        .status_msg_time = 0,
     };
 }
 
@@ -144,6 +150,7 @@ pub fn refreshScreen(self: *Editor) !void {
 
     try self.drawRows();
     try self.drawStatusBar();
+    try self.drawMessageBar();
 
     try self.append_buffer.print(self.allocator, Ansi.esc_seq ++ "{d};{d}H", .{
         (self.cursor.y - self.row_offset) + 1,
@@ -205,6 +212,11 @@ pub fn openFile(self: *Editor, filename: []const u8) !void {
         _ = writer.consumeAll();
         reader.toss(1);
     } else |err| if (err != error.EndOfStream) return err;
+}
+
+pub fn setStatusMessage(self: *Editor, comptime fmt: []const u8, args: anytype) !void {
+    self.status_msg = try std.fmt.bufPrint(&self.status_msg_buffer, fmt, args);
+    self.status_msg_time = std.time.timestamp();
 }
 
 fn appendRow(self: *Editor, str: []const u8) !void {
@@ -339,6 +351,15 @@ fn drawStatusBar(self: *Editor) !void {
     }
 
     try self.append_buffer.appendSlice(self.allocator, Ansi.normal_colors);
+    try self.append_buffer.appendSlice(self.allocator, "\r\n");
+}
+
+fn drawMessageBar(self: *Editor) !void {
+    try self.append_buffer.appendSlice(self.allocator, Ansi.clear_line);
+    const len = @min(self.status_msg.len, self.screen.cols);
+    if (std.time.timestamp() - self.status_msg_time < 5) {
+        try self.append_buffer.appendSlice(self.allocator, self.status_msg[0..len]);
+    }
 }
 
 fn readKey() !Key {

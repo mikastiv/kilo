@@ -32,6 +32,8 @@ pub fn main() !void {
 
     defer editor.clearScreen() catch {};
 
+    try editor.setStatusMessage("HELP: Ctrl-Q = quit", .{});
+
     var quit = false;
     while (!quit) {
         try editor.refreshScreen();
