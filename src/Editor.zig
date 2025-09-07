@@ -69,12 +69,24 @@ const Row = struct {
             }
         }
     }
+
+    fn cxToRx(self: *const Row, cx: usize) usize {
+        var rx: usize = 0;
+        for (0..cx) |idx| {
+            const char = self.chars.items[idx];
+            if (char == '\t')
+                rx += (tab_stop - 1) - (rx % tab_stop);
+            rx += 1;
+        }
+        return rx;
+    }
 };
 
 allocator: std.mem.Allocator,
 append_buffer: std.ArrayList(u8),
 screen: Screen,
 cursor: Pos,
+rx: usize,
 rows: std.ArrayList(Row),
 row_offset: usize,
 col_offset: usize,
@@ -100,6 +112,7 @@ pub fn init(allocator: std.mem.Allocator) !Editor {
             .cols = winsize.cols,
         },
         .cursor = .{ .x = 0, .y = 0 },
+        .rx = 0,
         .rows = .empty,
         .row_offset = 0,
         .col_offset = 0,
@@ -127,7 +140,7 @@ pub fn refreshScreen(self: *Editor) !void {
     try self.drawRows();
     try self.append_buffer.print(self.allocator, Ansi.esc_seq ++ "{d};{d}H", .{
         (self.cursor.y - self.row_offset) + 1,
-        (self.cursor.x - self.col_offset) + 1,
+        (self.rx - self.col_offset) + 1,
     });
     try self.append_buffer.appendSlice(self.allocator, Ansi.cursor_show);
 
@@ -146,11 +159,23 @@ pub fn processKeypress(self: *Editor, quit: *bool) !void {
             try stdout.flush();
         },
         .left, .right, .up, .down => self.moveCursor(char),
-        .page_up, .page_down => for (0..self.screen.rows) |_| {
-            self.moveCursor(if (char == .page_up) .up else .down);
+        .page_up, .page_down => {
+            if (char == .page_up) {
+                self.cursor.y = self.row_offset;
+            } else if (char == .page_down) {
+                self.cursor.y = self.row_offset + self.screen.rows - 1;
+                if (self.cursor.y > self.rows.items.len)
+                    self.cursor.y = self.rows.items.len;
+            }
+
+            for (0..self.screen.rows) |_| {
+                self.moveCursor(if (char == .page_up) .up else .down);
+            }
         },
         .home => self.cursor.x = 0,
-        .end => self.cursor.x = self.screen.cols - 1,
+        .end => if (self.cursor.y < self.rows.items.len) {
+            self.cursor.x = self.currentRow().?.chars.items.len;
+        },
         else => {},
     };
 }
@@ -220,6 +245,11 @@ fn moveCursor(self: *Editor, char: Key) void {
 }
 
 fn scroll(self: *Editor) void {
+    self.rx = 0;
+    if (self.cursor.y < self.rows.items.len) {
+        self.rx = self.currentRow().?.cxToRx(self.cursor.x);
+    }
+
     if (self.cursor.y < self.row_offset) {
         self.row_offset = self.cursor.y;
     }
@@ -228,12 +258,12 @@ fn scroll(self: *Editor) void {
         self.row_offset = self.cursor.y - self.screen.rows + 1;
     }
 
-    if (self.cursor.x < self.col_offset) {
-        self.col_offset = self.cursor.x;
+    if (self.rx < self.col_offset) {
+        self.col_offset = self.rx;
     }
 
-    if (self.cursor.x >= self.col_offset + self.screen.cols) {
-        self.col_offset = self.cursor.x - self.screen.cols + 1;
+    if (self.rx >= self.col_offset + self.screen.cols) {
+        self.col_offset = self.rx - self.screen.cols + 1;
     }
 }
 
