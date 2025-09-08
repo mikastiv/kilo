@@ -1,5 +1,10 @@
 const Editor = @This();
 
+const std = @import("std");
+const stdio = @import("stdio.zig");
+const linux = @import("linux.zig");
+const posix = std.posix;
+
 const version: std.SemanticVersion = .{
     .major = 0,
     .minor = 0,
@@ -7,11 +12,6 @@ const version: std.SemanticVersion = .{
 };
 
 const tab_stop = 8;
-
-const std = @import("std");
-const stdio = @import("stdio.zig");
-const linux = @import("linux.zig");
-const posix = std.posix;
 
 const stdin = stdio.stdin;
 const stdout = stdio.stdout;
@@ -47,6 +47,7 @@ const Key = enum(u8) {
     ctrl_h = 'h' & 0x1f,
     ctrl_l = 'l' & 0x1f,
     ctrl_q = 'q' & 0x1f,
+    ctrl_s = 's' & 0x1f,
     backspace = 127,
     left = 128,
     right = 129,
@@ -185,6 +186,7 @@ pub fn processKeypress(self: *Editor, quit: *bool) !void {
             try stdout.writeAll(Ansi.clear_screen ++ Ansi.cursor_top);
             try stdout.flush();
         },
+        .ctrl_s => try self.save(),
         .backspace, .delete, .ctrl_h => {},
         .left, .right, .up, .down => self.moveCursor(char),
         .page_up, .page_down => {
@@ -231,6 +233,39 @@ pub fn openFile(self: *Editor, filename: []const u8) !void {
 pub fn setStatusMessage(self: *Editor, comptime fmt: []const u8, args: anytype) !void {
     self.status_msg = try std.fmt.bufPrint(&self.status_msg_buffer, fmt, args);
     self.status_msg_time = std.time.timestamp();
+}
+
+fn save(self: *Editor) !void {
+    errdefer |err| self.setStatusMessage("Can't save! I/O error: {t}", .{err}) catch {};
+
+    const filename = self.filename orelse return;
+    const buffer = try self.rowsToString();
+    defer self.allocator.free(buffer);
+
+    const file = try std.fs.cwd().createFile(filename, .{ .truncate = false });
+    defer file.close();
+
+    try linux.ftruncate(file.handle, buffer.len);
+    try file.writeAll(buffer);
+
+    try self.setStatusMessage("{d} bytes written to disk", .{buffer.len});
+}
+
+fn rowsToString(self: *const Editor) ![]u8 {
+    var total_size: usize = 0;
+    for (self.rows.items) |row| {
+        total_size += row.chars.items.len + 1;
+    }
+
+    var buffer = try std.ArrayList(u8).initCapacity(self.allocator, total_size);
+    errdefer buffer.deinit(self.allocator);
+
+    for (self.rows.items) |row| {
+        buffer.appendSliceAssumeCapacity(row.chars.items);
+        buffer.appendAssumeCapacity('\n');
+    }
+
+    return try buffer.toOwnedSlice(self.allocator);
 }
 
 fn insertChar(self: *Editor, char: u8) !void {

@@ -50,3 +50,7 @@ pub fn getWindowSize() !WinSize {
         .cols = ws.col,
     };
 }
+
+pub fn ftruncate(fd: std.fs.File.Handle, length: u64) !void {
+    try posix.ftruncate(fd, length);
+}
