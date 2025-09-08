@@ -42,7 +42,12 @@ const Pos = struct {
 };
 
 const Key = enum(u8) {
+    enter = '\r',
+    escape = '\x1b',
+    ctrl_h = 'h' & 0x1f,
+    ctrl_l = 'l' & 0x1f,
     ctrl_q = 'q' & 0x1f,
+    backspace = 127,
     left = 128,
     right = 129,
     up = 130,
@@ -70,6 +75,12 @@ const Row = struct {
                 try self.render.append(allocator, char);
             }
         }
+    }
+
+    fn insertChar(self: *Row, allocator: std.mem.Allocator, at: usize, char: u8) !void {
+        const index = @min(at, self.chars.items.len);
+        try self.chars.insert(allocator, index, char);
+        try self.update(allocator);
     }
 
     fn cxToRx(self: *const Row, cx: usize) usize {
@@ -168,11 +179,13 @@ pub fn refreshScreen(self: *Editor) !void {
 pub fn processKeypress(self: *Editor, quit: *bool) !void {
     const char = try readKey();
     return switch (char) {
+        .enter => {},
         .ctrl_q => {
             quit.* = true;
             try stdout.writeAll(Ansi.clear_screen ++ Ansi.cursor_top);
             try stdout.flush();
         },
+        .backspace, .delete, .ctrl_h => {},
         .left, .right, .up, .down => self.moveCursor(char),
         .page_up, .page_down => {
             if (char == .page_up) {
@@ -191,7 +204,8 @@ pub fn processKeypress(self: *Editor, quit: *bool) !void {
         .end => if (self.cursor.y < self.rows.items.len) {
             self.cursor.x = self.currentRow().?.chars.items.len;
         },
-        else => {},
+        .escape, .ctrl_l => {},
+        else => try self.insertChar(@intFromEnum(char)),
     };
 }
 
@@ -217,6 +231,16 @@ pub fn openFile(self: *Editor, filename: []const u8) !void {
 pub fn setStatusMessage(self: *Editor, comptime fmt: []const u8, args: anytype) !void {
     self.status_msg = try std.fmt.bufPrint(&self.status_msg_buffer, fmt, args);
     self.status_msg_time = std.time.timestamp();
+}
+
+fn insertChar(self: *Editor, char: u8) !void {
+    if (self.cursor.y == self.rows.items.len) {
+        try self.appendRow("");
+    }
+
+    const row = self.currentRow().?;
+    try row.insertChar(self.allocator, self.cursor.x, char);
+    self.cursor.x += 1;
 }
 
 fn appendRow(self: *Editor, str: []const u8) !void {
