@@ -12,6 +12,7 @@ const version: std.SemanticVersion = .{
 };
 
 const tab_stop = 8;
+const presses_before_quit = 3;
 
 const stdin = stdio.stdin;
 const stdout = stdio.stdout;
@@ -105,9 +106,10 @@ rows: std.ArrayList(Row),
 row_offset: usize,
 col_offset: usize,
 filename: ?[]const u8,
-status_msg_buffer: [64]u8,
+status_msg_buffer: [128]u8,
 status_msg: []const u8,
 status_msg_time: i64,
+dirty: u32,
 
 pub fn init(allocator: std.mem.Allocator) !Editor {
     const winsize: linux.WinSize = linux.getWindowSize() catch blk: {
@@ -138,6 +140,7 @@ pub fn init(allocator: std.mem.Allocator) !Editor {
         .status_msg_buffer = undefined,
         .status_msg = "",
         .status_msg_time = 0,
+        .dirty = 0,
     };
 }
 
@@ -178,10 +181,23 @@ pub fn refreshScreen(self: *Editor) !void {
 }
 
 pub fn processKeypress(self: *Editor, quit: *bool) !void {
+    const S = struct {
+        var quit_times: u32 = presses_before_quit;
+    };
+
     const char = try readKey();
-    return switch (char) {
+    switch (char) {
         .enter => {},
         .ctrl_q => {
+            if (self.dirty != 0 and S.quit_times > 0) {
+                try self.setStatusMessage(
+                    "WARNING! File has unsaved changes. Press Ctrl-Q {d} more times to quit.",
+                    .{S.quit_times},
+                );
+                S.quit_times -= 1;
+                return;
+            }
+
             quit.* = true;
             try stdout.writeAll(Ansi.clear_screen ++ Ansi.cursor_top);
             try stdout.flush();
@@ -208,7 +224,9 @@ pub fn processKeypress(self: *Editor, quit: *bool) !void {
         },
         .escape, .ctrl_l => {},
         else => try self.insertChar(@intFromEnum(char)),
-    };
+    }
+
+    S.quit_times = presses_before_quit;
 }
 
 pub fn openFile(self: *Editor, filename: []const u8) !void {
@@ -228,6 +246,8 @@ pub fn openFile(self: *Editor, filename: []const u8) !void {
         _ = writer.consumeAll();
         reader.toss(1);
     } else |err| if (err != error.EndOfStream) return err;
+
+    self.dirty = 0;
 }
 
 pub fn setStatusMessage(self: *Editor, comptime fmt: []const u8, args: anytype) !void {
@@ -247,6 +267,7 @@ fn save(self: *Editor) !void {
 
     try linux.ftruncate(file.handle, buffer.len);
     try file.writeAll(buffer);
+    self.dirty = 0;
 
     try self.setStatusMessage("{d} bytes written to disk", .{buffer.len});
 }
@@ -276,6 +297,7 @@ fn insertChar(self: *Editor, char: u8) !void {
     const row = self.currentRow().?;
     try row.insertChar(self.allocator, self.cursor.x, char);
     self.cursor.x += 1;
+    self.dirty += 1;
 }
 
 fn appendRow(self: *Editor, str: []const u8) !void {
@@ -285,6 +307,8 @@ fn appendRow(self: *Editor, str: []const u8) !void {
     const row = &self.rows.items[index];
     try row.chars.appendSlice(self.allocator, str);
     try row.update(self.allocator);
+
+    self.dirty += 1;
 }
 
 fn currentRow(self: *const Editor) ?*Row {
@@ -385,8 +409,12 @@ fn drawStatusBar(self: *Editor) !void {
     var left_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const left_str = try std.fmt.bufPrint(
         &left_buffer,
-        " {s} - {d} lines",
-        .{ self.filename orelse "[No Name]", self.rows.items.len },
+        " {s} - {d} lines {s}",
+        .{
+            self.filename orelse "[No Name]",
+            self.rows.items.len,
+            if (self.dirty != 0) "(modified)" else "",
+        },
     );
     const left_status = left_str[0..@min(left_str.len, self.screen.cols)];
 
