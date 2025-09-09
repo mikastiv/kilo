@@ -85,6 +85,17 @@ const Row = struct {
         try self.update(allocator);
     }
 
+    fn deleteChar(self: *Row, allocator: std.mem.Allocator, at: usize) !void {
+        const index = @min(at, self.chars.items.len -| 1);
+        _ = self.chars.orderedRemove(index);
+        try self.update(allocator);
+    }
+
+    fn appendString(self: *Row, allocator: std.mem.Allocator, str: []const u8) !void {
+        try self.chars.appendSlice(allocator, str);
+        try self.update(allocator);
+    }
+
     fn cxToRx(self: *const Row, cx: usize) usize {
         var rx: usize = 0;
         for (0..cx) |idx| {
@@ -203,7 +214,10 @@ pub fn processKeypress(self: *Editor, quit: *bool) !void {
             try stdout.flush();
         },
         .ctrl_s => try self.save(),
-        .backspace, .delete, .ctrl_h => {},
+        .backspace, .delete, .ctrl_h => {
+            if (char == .delete) self.moveCursor(.right);
+            try self.deleteChar();
+        },
         .left, .right, .up, .down => self.moveCursor(char),
         .page_up, .page_down => {
             if (char == .page_up) {
@@ -300,6 +314,25 @@ fn insertChar(self: *Editor, char: u8) !void {
     self.dirty += 1;
 }
 
+fn deleteChar(self: *Editor) !void {
+    if (self.cursor.y == self.rows.items.len) return;
+    if (self.cursor.y == 0 and self.cursor.x == 0) return;
+
+    const row = self.currentRow().?;
+    if (self.cursor.x > 0) {
+        try row.deleteChar(self.allocator, self.cursor.x - 1);
+        self.cursor.x -= 1;
+    } else {
+        const prev_row = &self.rows.items[self.cursor.y - 1];
+        self.cursor.x = prev_row.chars.items.len;
+        try prev_row.appendString(self.allocator, row.chars.items);
+        self.deleteRow(self.cursor.y);
+        self.cursor.y -= 1;
+    }
+
+    self.dirty += 1;
+}
+
 fn appendRow(self: *Editor, str: []const u8) !void {
     const index = self.rows.items.len;
     try self.rows.append(self.allocator, .{ .chars = .empty, .render = .empty });
@@ -308,6 +341,14 @@ fn appendRow(self: *Editor, str: []const u8) !void {
     try row.chars.appendSlice(self.allocator, str);
     try row.update(self.allocator);
 
+    self.dirty += 1;
+}
+
+fn deleteRow(self: *Editor, at: usize) void {
+    const index = @min(at, self.rows.items.len -| 1);
+    var row = self.rows.orderedRemove(index);
+    row.chars.deinit(self.allocator);
+    row.render.deinit(self.allocator);
     self.dirty += 1;
 }
 
