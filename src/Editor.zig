@@ -1,9 +1,12 @@
-const Editor = @This();
-
 const std = @import("std");
-const stdio = @import("stdio.zig");
-const linux = @import("linux.zig");
 const posix = std.posix;
+
+const linux = @import("linux.zig");
+const stdio = @import("stdio.zig");
+const stdin = stdio.stdin;
+const stdout = stdio.stdout;
+
+const Editor = @This();
 
 const version: std.SemanticVersion = .{
     .major = 0,
@@ -13,9 +16,6 @@ const version: std.SemanticVersion = .{
 
 const tab_stop = 8;
 const presses_before_quit = 3;
-
-const stdin = stdio.stdin;
-const stdout = stdio.stdout;
 
 const Ansi = struct {
     const esc = "\x1b";
@@ -198,7 +198,9 @@ pub fn processKeypress(self: *Editor, quit: *bool) !void {
 
     const char = try readKey();
     switch (char) {
-        .enter => {},
+        .enter => {
+            try self.insertNewline();
+        },
         .ctrl_q => {
             if (self.dirty != 0 and S.quit_times > 0) {
                 try self.setStatusMessage(
@@ -256,7 +258,7 @@ pub fn openFile(self: *Editor, filename: []const u8) !void {
     var writer = std.Io.Writer.fixed(&write_buffer);
 
     while (reader.streamDelimiter(&writer, '\n')) |_| {
-        try self.appendRow(writer.buffered());
+        try self.insertRow(self.rows.items.len, writer.buffered());
         _ = writer.consumeAll();
         reader.toss(1);
     } else |err| if (err != error.EndOfStream) return err;
@@ -305,7 +307,7 @@ fn rowsToString(self: *const Editor) ![]u8 {
 
 fn insertChar(self: *Editor, char: u8) !void {
     if (self.cursor.y == self.rows.items.len) {
-        try self.appendRow("");
+        try self.insertRow(self.rows.items.len, "");
     }
 
     const row = self.currentRow().?;
@@ -333,11 +335,27 @@ fn deleteChar(self: *Editor) !void {
     self.dirty += 1;
 }
 
-fn appendRow(self: *Editor, str: []const u8) !void {
-    const index = self.rows.items.len;
-    try self.rows.append(self.allocator, .{ .chars = .empty, .render = .empty });
+fn insertNewline(self: *Editor) !void {
+    if (self.cursor.x == 0) {
+        try self.insertRow(self.cursor.y, "");
+    } else {
+        var row = self.currentRow().?;
+        try self.insertRow(self.cursor.y + 1, row.chars.items[self.cursor.x..]);
+        row = self.currentRow().?;
+        row.chars.shrinkRetainingCapacity(self.cursor.x);
+        try row.update(self.allocator);
+    }
 
-    const row = &self.rows.items[index];
+    self.cursor.y += 1;
+    self.cursor.x = 0;
+}
+
+fn insertRow(self: *Editor, at: usize, str: []const u8) !void {
+    if (at > self.rows.items.len) return;
+
+    try self.rows.insert(self.allocator, at, .{ .chars = .empty, .render = .empty });
+
+    const row = &self.rows.items[at];
     try row.chars.appendSlice(self.allocator, str);
     try row.update(self.allocator);
 
