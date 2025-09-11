@@ -60,6 +60,11 @@ const Key = enum(u8) {
     end = 135,
     delete = 136,
     _,
+
+    fn isControl(self: Key) bool {
+        const raw: u8 = @intFromEnum(self);
+        return raw >= 127 or raw < 32;
+    }
 };
 
 const Row = struct {
@@ -162,6 +167,9 @@ pub fn deinit(self: *Editor) void {
         row.render.deinit(self.allocator);
     }
     self.rows.deinit(self.allocator);
+    if (self.filename) |filename| {
+        self.allocator.free(filename);
+    }
 }
 
 pub fn clearScreen(_: *const Editor) !void {
@@ -246,7 +254,7 @@ pub fn processKeypress(self: *Editor, quit: *bool) !void {
 }
 
 pub fn openFile(self: *Editor, filename: []const u8) !void {
-    self.filename = filename;
+    self.filename = try self.allocator.dupe(u8, filename);
     const file = try std.fs.cwd().openFile(filename, .{ .mode = .read_only });
     defer file.close();
 
@@ -274,7 +282,15 @@ pub fn setStatusMessage(self: *Editor, comptime fmt: []const u8, args: anytype) 
 fn save(self: *Editor) !void {
     errdefer |err| self.setStatusMessage("Can't save! I/O error: {t}", .{err}) catch {};
 
-    const filename = self.filename orelse return;
+    const filename = self.filename orelse blk: {
+        self.filename = try self.prompt("Save as: {s}");
+        if (self.filename) |name| {
+            break :blk name;
+        } else {
+            return;
+        }
+    };
+
     const buffer = try self.rowsToString();
     defer self.allocator.free(buffer);
 
@@ -286,6 +302,36 @@ fn save(self: *Editor) !void {
     self.dirty = 0;
 
     try self.setStatusMessage("{d} bytes written to disk", .{buffer.len});
+}
+
+fn prompt(self: *Editor, comptime prompt_text: []const u8) !?[]u8 {
+    var alloc_writer: std.Io.Writer.Allocating = .init(self.allocator);
+    errdefer alloc_writer.deinit();
+
+    const writer = &alloc_writer.writer;
+
+    while (true) {
+        try self.setStatusMessage(prompt_text, .{alloc_writer.written()});
+        try self.refreshScreen();
+
+        const key = try readKey();
+        if (key == .backspace or key == .delete or key == .ctrl_h) {
+            if (writer.end > 0) {
+                writer.undo(1);
+            }
+        } else if (key == .escape) {
+            try self.setStatusMessage("", .{});
+            alloc_writer.deinit();
+            return null;
+        } else if (key == .enter) {
+            if (alloc_writer.written().len != 0) {
+                try self.setStatusMessage("", .{});
+                return try alloc_writer.toOwnedSlice();
+            }
+        } else if (!key.isControl()) {
+            try writer.writeByte(@intFromEnum(key));
+        }
+    }
 }
 
 fn rowsToString(self: *const Editor) ![]u8 {
