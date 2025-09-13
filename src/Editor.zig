@@ -30,6 +30,20 @@ const Ansi = struct {
     const cursor_show = esc_seq ++ "?25h";
     const invert_colors = esc_seq ++ "7m";
     const normal_colors = esc_seq ++ "m";
+    const fg_color_default = esc_seq ++ "39m";
+    const fg_color_red = esc_seq ++ "31m";
+};
+
+const Color = enum {
+    default,
+    red,
+
+    fn toAnsi(self: Color) []const u8 {
+        return switch (self) {
+            .default => Ansi.fg_color_default,
+            .red => Ansi.fg_color_red,
+        };
+    }
 };
 
 pub const Screen = struct {
@@ -68,9 +82,22 @@ const Key = enum(u8) {
     }
 };
 
+const Highlight = enum {
+    normal,
+    number,
+
+    fn toColor(self: Highlight) Color {
+        return switch (self) {
+            .normal => .default,
+            .number => .red,
+        };
+    }
+};
+
 const Row = struct {
     chars: std.ArrayList(u8),
     render: std.ArrayList(u8),
+    highlight: std.ArrayList(Highlight),
 
     fn update(self: *Row, allocator: std.mem.Allocator) !void {
         self.render.clearRetainingCapacity();
@@ -81,6 +108,19 @@ const Row = struct {
                 try self.render.appendNTimes(allocator, ' ', count);
             } else {
                 try self.render.append(allocator, char);
+            }
+        }
+
+        try self.updateSyntax(allocator);
+    }
+
+    fn updateSyntax(self: *Row, allocator: std.mem.Allocator) !void {
+        self.highlight.clearRetainingCapacity();
+        try self.highlight.appendNTimes(allocator, .normal, self.render.items.len);
+
+        for (self.render.items, 0..) |char, idx| {
+            if (std.ascii.isDigit(char)) {
+                self.highlight.items[idx] = .number;
             }
         }
     }
@@ -182,6 +222,7 @@ pub fn deinit(self: *Editor) void {
     for (self.rows.items) |*row| {
         row.chars.deinit(self.allocator);
         row.render.deinit(self.allocator);
+        row.highlight.deinit(self.allocator);
     }
     self.rows.deinit(self.allocator);
     if (self.filename) |filename| {
@@ -482,7 +523,7 @@ fn insertNewline(self: *Editor) !void {
 fn insertRow(self: *Editor, at: usize, str: []const u8) !void {
     if (at > self.rows.items.len) return;
 
-    try self.rows.insert(self.allocator, at, .{ .chars = .empty, .render = .empty });
+    try self.rows.insert(self.allocator, at, .{ .chars = .empty, .render = .empty, .highlight = .empty });
 
     const row = &self.rows.items[at];
     try row.chars.appendSlice(self.allocator, str);
@@ -583,7 +624,28 @@ fn drawRows(self: *Editor) !void {
             const len = @min(row.render.items.len -| self.col_offset, self.screen.cols);
             const index = @min(self.col_offset, row.render.items.len);
             const line = row.render.items[index .. index + len];
-            try self.append_buffer.appendSlice(self.allocator, line);
+            const highlight = row.highlight.items[index .. index + len];
+            var current_color: Color = .default;
+            for (line, highlight) |char, hl| {
+                switch (hl) {
+                    .normal => {
+                        if (current_color != .default) {
+                            try self.append_buffer.appendSlice(self.allocator, Ansi.fg_color_default);
+                            current_color = .default;
+                        }
+                        try self.append_buffer.append(self.allocator, char);
+                    },
+                    .number => {
+                        const color = hl.toColor();
+                        if (color != current_color) {
+                            try self.append_buffer.appendSlice(self.allocator, color.toAnsi());
+                            current_color = color;
+                        }
+                        try self.append_buffer.append(self.allocator, char);
+                    },
+                }
+            }
+            try self.append_buffer.appendSlice(self.allocator, Ansi.fg_color_default);
         }
 
         try self.append_buffer.appendSlice(self.allocator, Ansi.clear_line);
