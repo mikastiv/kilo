@@ -32,7 +32,7 @@ pub fn main() !void {
 
     defer editor.clearScreen() catch {};
 
-    try editor.setStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit", .{});
+    try editor.setStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find", .{});
 
     var quit = false;
     while (!quit) {

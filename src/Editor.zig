@@ -45,6 +45,7 @@ const Pos = struct {
 const Key = enum(u8) {
     enter = '\r',
     escape = '\x1b',
+    ctrl_f = 'f' & 0x1f,
     ctrl_h = 'h' & 0x1f,
     ctrl_l = 'l' & 0x1f,
     ctrl_q = 'q' & 0x1f,
@@ -110,6 +111,22 @@ const Row = struct {
             rx += 1;
         }
         return rx;
+    }
+
+    fn rxToCx(self: *const Row, rx: usize) usize {
+        var cur_rx: usize = 0;
+        var cx: usize = 0;
+        for (self.chars.items) |char| {
+            if (char == '\t')
+                cur_rx += (tab_stop - 1) - (cur_rx % tab_stop);
+            cur_rx += 1;
+
+            if (cur_rx > rx) return cx;
+
+            cx += 1;
+        }
+
+        return cx;
     }
 };
 
@@ -224,6 +241,7 @@ pub fn processKeypress(self: *Editor, quit: *bool) !void {
             try stdout.flush();
         },
         .ctrl_s => try self.save(),
+        .ctrl_f => try self.find(),
         .backspace, .delete, .ctrl_h => {
             if (char == .delete) self.moveCursor(.right);
             try self.deleteChar();
@@ -283,7 +301,7 @@ fn save(self: *Editor) !void {
     errdefer |err| self.setStatusMessage("Can't save! I/O error: {t}", .{err}) catch {};
 
     const filename = self.filename orelse blk: {
-        self.filename = try self.prompt("Save as: {s}");
+        self.filename = try self.prompt("Save as: {s}", null);
         if (self.filename) |name| {
             break :blk name;
         } else {
@@ -304,7 +322,7 @@ fn save(self: *Editor) !void {
     try self.setStatusMessage("{d} bytes written to disk", .{buffer.len});
 }
 
-fn prompt(self: *Editor, comptime prompt_text: []const u8) !?[]u8 {
+fn prompt(self: *Editor, comptime prompt_text: []const u8, callback: ?*const fn (*Editor, []const u8, Key) void) !?[]u8 {
     var alloc_writer: std.Io.Writer.Allocating = .init(self.allocator);
     errdefer alloc_writer.deinit();
 
@@ -321,15 +339,80 @@ fn prompt(self: *Editor, comptime prompt_text: []const u8) !?[]u8 {
             }
         } else if (key == .escape) {
             try self.setStatusMessage("", .{});
+            if (callback) |cb| cb(self, alloc_writer.written(), key);
             alloc_writer.deinit();
             return null;
         } else if (key == .enter) {
             if (alloc_writer.written().len != 0) {
                 try self.setStatusMessage("", .{});
+                if (callback) |cb| cb(self, alloc_writer.written(), key);
                 return try alloc_writer.toOwnedSlice();
             }
         } else if (!key.isControl()) {
             try writer.writeByte(@intFromEnum(key));
+        }
+
+        if (callback) |cb| cb(self, alloc_writer.written(), key);
+    }
+}
+
+fn find(self: *Editor) !void {
+    const saved_cursor = self.cursor;
+    const saved_row_offset = self.row_offset;
+    const saved_col_offset = self.col_offset;
+
+    if (try self.prompt("Search: {s} (Use ESC/Arrows/Enter)", findCallback)) |query| {
+        defer self.allocator.free(query);
+    } else {
+        self.cursor = saved_cursor;
+        self.row_offset = saved_row_offset;
+        self.col_offset = saved_col_offset;
+    }
+}
+
+fn findCallback(self: *Editor, query: []const u8, key: Key) void {
+    const S = struct {
+        const Dir = enum(i8) {
+            backward = -1,
+            forward = 1,
+        };
+
+        var last_match: ?usize = null;
+        var direction: Dir = .forward;
+    };
+
+    switch (key) {
+        .enter, .escape => {
+            S.last_match = null;
+            S.direction = .forward;
+            return;
+        },
+        .right, .down => S.direction = .forward,
+        .left, .up => S.direction = .backward,
+        else => {
+            S.last_match = null;
+            S.direction = .forward;
+        },
+    }
+
+    if (S.last_match == null) S.direction = .forward;
+    var current = S.last_match orelse std.math.maxInt(usize);
+    for (self.rows.items) |_| {
+        current +%= @bitCast(@as(isize, @intFromEnum(S.direction)));
+
+        const row_count = self.rows.items.len;
+        if (current == row_count)
+            current = 0
+        else if (current > row_count)
+            current = row_count -| 1;
+
+        const row = &self.rows.items[current];
+        if (std.mem.indexOf(u8, row.render.items, query)) |match| {
+            S.last_match = current;
+            self.cursor.y = current;
+            self.cursor.x = row.rxToCx(match);
+            self.row_offset = self.rows.items.len;
+            break;
         }
     }
 }
