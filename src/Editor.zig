@@ -32,16 +32,19 @@ const Ansi = struct {
     const normal_colors = esc_seq ++ "m";
     const fg_color_default = esc_seq ++ "39m";
     const fg_color_red = esc_seq ++ "31m";
+    const fg_color_blue = esc_seq ++ "34m";
 };
 
 const Color = enum {
     default,
     red,
+    blue,
 
     fn toAnsi(self: Color) []const u8 {
         return switch (self) {
             .default => Ansi.fg_color_default,
             .red => Ansi.fg_color_red,
+            .blue => Ansi.fg_color_blue,
         };
     }
 };
@@ -85,21 +88,51 @@ const Key = enum(u8) {
 const Highlight = enum {
     normal,
     number,
+    match,
 
     fn toColor(self: Highlight) Color {
         return switch (self) {
             .normal => .default,
             .number => .red,
+            .match => .blue,
         };
     }
 };
+
+const Syntax = struct {
+    const Flags = packed struct {
+        numbers: bool,
+    };
+
+    filetype: []const u8,
+    filematch: []const []const u8,
+    flags: Flags,
+
+    const c_extensions = &.{ ".c", ".h", ".cpp" };
+    const zig_extensions = &.{".zig"};
+};
+
+const highlight_db: []const Syntax = &.{ .{
+    .filetype = "c",
+    .filematch = Syntax.c_extensions,
+    .flags = .{ .numbers = true },
+}, .{
+    .filetype = "zig",
+    .filematch = Syntax.zig_extensions,
+    .flags = .{ .numbers = true },
+} };
+
+fn isSeparator(char: u8) bool {
+    return std.ascii.isWhitespace(char) or
+        std.mem.indexOfScalar(u8, ",.()+-/*=~%<>[];", char) != null;
+}
 
 const Row = struct {
     chars: std.ArrayList(u8),
     render: std.ArrayList(u8),
     highlight: std.ArrayList(Highlight),
 
-    fn update(self: *Row, allocator: std.mem.Allocator) !void {
+    fn update(self: *Row, allocator: std.mem.Allocator, maybe_syntax: ?Syntax) !void {
         self.render.clearRetainingCapacity();
 
         for (self.chars.items) |char| {
@@ -111,35 +144,60 @@ const Row = struct {
             }
         }
 
-        try self.updateSyntax(allocator);
+        try self.updateSyntax(allocator, maybe_syntax);
     }
 
-    fn updateSyntax(self: *Row, allocator: std.mem.Allocator) !void {
+    fn updateSyntax(self: *Row, allocator: std.mem.Allocator, maybe_syntax: ?Syntax) !void {
         self.highlight.clearRetainingCapacity();
         try self.highlight.appendNTimes(allocator, .normal, self.render.items.len);
 
-        for (self.render.items, 0..) |char, idx| {
-            if (std.ascii.isDigit(char)) {
-                self.highlight.items[idx] = .number;
+        const syntax = maybe_syntax orelse return;
+
+        var prev_separator = true;
+
+        var i: usize = 0;
+        while (i < self.render.items.len) {
+            const char = self.render.items[i];
+            const prev_hl = if (i > 0) self.highlight.items[i - 1] else .normal;
+
+            if (syntax.flags.numbers) {
+                if (std.ascii.isDigit(char) and
+                    (prev_separator or prev_hl == .number) or
+                    (char == '.' and prev_hl == .number))
+                {
+                    self.highlight.items[i] = .number;
+                    i += 1;
+                    prev_separator = false;
+                    continue;
+                }
             }
+
+            prev_separator = isSeparator(char);
+            i += 1;
         }
     }
 
-    fn insertChar(self: *Row, allocator: std.mem.Allocator, at: usize, char: u8) !void {
+    fn insertChar(
+        self: *Row,
+        allocator: std.mem.Allocator,
+        maybe_syntax: ?Syntax,
+        at: usize,
+        char: u8,
+    ) !void {
         const index = @min(at, self.chars.items.len);
         try self.chars.insert(allocator, index, char);
-        try self.update(allocator);
+        try self.update(allocator, maybe_syntax);
     }
 
-    fn deleteChar(self: *Row, allocator: std.mem.Allocator, at: usize) !void {
+    fn deleteChar(self: *Row, allocator: std.mem.Allocator, maybe_syntax: ?Syntax, at: usize) !void {
         const index = @min(at, self.chars.items.len -| 1);
         _ = self.chars.orderedRemove(index);
-        try self.update(allocator);
+        try self.update(allocator, maybe_syntax);
     }
 
-    fn appendString(self: *Row, allocator: std.mem.Allocator, str: []const u8) !void {
+    fn appendString(self: *Row, allocator: std.mem.Allocator, maybe_syntax: ?Syntax, str: []const u8) !void {
         try self.chars.appendSlice(allocator, str);
-        try self.update(allocator);
+        try self.update(allocator, maybe_syntax);
     }
 
     fn cxToRx(self: *const Row, cx: usize) usize {
@@ -183,6 +241,7 @@ status_msg_buffer: [128]u8,
 status_msg: []const u8,
 status_msg_time: i64,
 dirty: u32,
+syntax: ?Syntax,
 
 pub fn init(allocator: std.mem.Allocator) !Editor {
     const winsize: linux.WinSize = linux.getWindowSize() catch blk: {
@@ -214,6 +273,7 @@ pub fn init(allocator: std.mem.Allocator) !Editor {
         .status_msg = "",
         .status_msg_time = 0,
         .dirty = 0,
+        .syntax = null,
     };
 }
 
@@ -313,7 +373,12 @@ pub fn processKeypress(self: *Editor, quit: *bool) !void {
 }
 
 pub fn openFile(self: *Editor, filename: []const u8) !void {
+    if (self.filename) |name| self.allocator.free(name);
+
     self.filename = try self.allocator.dupe(u8, filename);
+
+    try self.selectSyntaxHighlight();
+
     const file = try std.fs.cwd().openFile(filename, .{ .mode = .read_only });
     defer file.close();
 
@@ -338,14 +403,35 @@ pub fn setStatusMessage(self: *Editor, comptime fmt: []const u8, args: anytype) 
     self.status_msg_time = std.time.timestamp();
 }
 
+fn selectSyntaxHighlight(self: *Editor) !void {
+    self.syntax = null;
+    const filename = self.filename orelse return;
+
+    const ext = std.fs.path.extension(filename);
+    for (highlight_db) |entry| {
+        for (entry.filematch) |filematch| {
+            const is_ext = filematch[0] == '.';
+            if (is_ext and std.mem.eql(u8, ext, filematch)) {
+                self.syntax = entry;
+                for (self.rows.items) |*row| {
+                    try row.updateSyntax(self.allocator, self.syntax);
+                }
+                return;
+            }
+        }
+    }
+}
+
 fn save(self: *Editor) !void {
     errdefer |err| self.setStatusMessage("Can't save! I/O error: {t}", .{err}) catch {};
 
     const filename = self.filename orelse blk: {
         self.filename = try self.prompt("Save as: {s}", null);
         if (self.filename) |name| {
+            try self.selectSyntaxHighlight();
             break :blk name;
         } else {
+            try self.setStatusMessage("Save aborted", .{});
             return;
         }
     };
@@ -363,7 +449,11 @@ fn save(self: *Editor) !void {
     try self.setStatusMessage("{d} bytes written to disk", .{buffer.len});
 }
 
-fn prompt(self: *Editor, comptime prompt_text: []const u8, callback: ?*const fn (*Editor, []const u8, Key) void) !?[]u8 {
+fn prompt(
+    self: *Editor,
+    comptime prompt_text: []const u8,
+    callback: ?*const fn (*Editor, []const u8, Key) error{OutOfMemory}!void,
+) !?[]u8 {
     var alloc_writer: std.Io.Writer.Allocating = .init(self.allocator);
     errdefer alloc_writer.deinit();
 
@@ -380,20 +470,20 @@ fn prompt(self: *Editor, comptime prompt_text: []const u8, callback: ?*const fn 
             }
         } else if (key == .escape) {
             try self.setStatusMessage("", .{});
-            if (callback) |cb| cb(self, alloc_writer.written(), key);
+            if (callback) |cb| try cb(self, alloc_writer.written(), key);
             alloc_writer.deinit();
             return null;
         } else if (key == .enter) {
             if (alloc_writer.written().len != 0) {
                 try self.setStatusMessage("", .{});
-                if (callback) |cb| cb(self, alloc_writer.written(), key);
+                if (callback) |cb| try cb(self, alloc_writer.written(), key);
                 return try alloc_writer.toOwnedSlice();
             }
         } else if (!key.isControl()) {
             try writer.writeByte(@intFromEnum(key));
         }
 
-        if (callback) |cb| cb(self, alloc_writer.written(), key);
+        if (callback) |cb| try cb(self, alloc_writer.written(), key);
     }
 }
 
@@ -411,7 +501,7 @@ fn find(self: *Editor) !void {
     }
 }
 
-fn findCallback(self: *Editor, query: []const u8, key: Key) void {
+fn findCallback(self: *Editor, query: []const u8, key: Key) !void {
     const S = struct {
         const Dir = enum(i8) {
             backward = -1,
@@ -420,7 +510,15 @@ fn findCallback(self: *Editor, query: []const u8, key: Key) void {
 
         var last_match: ?usize = null;
         var direction: Dir = .forward;
+        var saved_hl_line: usize = 0;
+        var saved_hl: ?[]const Highlight = null;
     };
+
+    if (S.saved_hl) |hl| {
+        @memcpy(self.rows.items[S.saved_hl_line].highlight.items, hl);
+        self.allocator.free(hl);
+        S.saved_hl = null;
+    }
 
     switch (key) {
         .enter, .escape => {
@@ -453,6 +551,10 @@ fn findCallback(self: *Editor, query: []const u8, key: Key) void {
             self.cursor.y = current;
             self.cursor.x = row.rxToCx(match);
             self.row_offset = self.rows.items.len;
+
+            S.saved_hl = try self.allocator.dupe(Highlight, row.highlight.items);
+            S.saved_hl_line = current;
+            @memset(row.highlight.items[match .. match + query.len], .match);
             break;
         }
     }
@@ -481,7 +583,7 @@ fn insertChar(self: *Editor, char: u8) !void {
     }
 
     const row = self.currentRow().?;
-    try row.insertChar(self.allocator, self.cursor.x, char);
+    try row.insertChar(self.allocator, self.syntax, self.cursor.x, char);
     self.cursor.x += 1;
     self.dirty += 1;
 }
@@ -492,12 +594,12 @@ fn deleteChar(self: *Editor) !void {
 
     const row = self.currentRow().?;
     if (self.cursor.x > 0) {
-        try row.deleteChar(self.allocator, self.cursor.x - 1);
+        try row.deleteChar(self.allocator, self.syntax, self.cursor.x - 1);
         self.cursor.x -= 1;
     } else {
         const prev_row = &self.rows.items[self.cursor.y - 1];
         self.cursor.x = prev_row.chars.items.len;
-        try prev_row.appendString(self.allocator, row.chars.items);
+        try prev_row.appendString(self.allocator, self.syntax, row.chars.items);
         self.deleteRow(self.cursor.y);
         self.cursor.y -= 1;
     }
@@ -513,7 +615,7 @@ fn insertNewline(self: *Editor) !void {
         try self.insertRow(self.cursor.y + 1, row.chars.items[self.cursor.x..]);
         row = self.currentRow().?;
         row.chars.shrinkRetainingCapacity(self.cursor.x);
-        try row.update(self.allocator);
+        try row.update(self.allocator, self.syntax);
     }
 
     self.cursor.y += 1;
@@ -527,7 +629,7 @@ fn insertRow(self: *Editor, at: usize, str: []const u8) !void {
 
     const row = &self.rows.items[at];
     try row.chars.appendSlice(self.allocator, str);
-    try row.update(self.allocator);
+    try row.update(self.allocator, self.syntax);
 
     self.dirty += 1;
 }
@@ -635,7 +737,7 @@ fn drawRows(self: *Editor) !void {
                         }
                         try self.append_buffer.append(self.allocator, char);
                     },
-                    .number => {
+                    .number, .match => {
                         const color = hl.toColor();
                         if (color != current_color) {
                             try self.append_buffer.appendSlice(self.allocator, color.toAnsi());
@@ -671,12 +773,16 @@ fn drawStatusBar(self: *Editor) !void {
     var right_buffer: [64]u8 = undefined;
     const right_status = try std.fmt.bufPrint(
         &right_buffer,
-        "{d}/{d} ",
-        .{ self.cursor.y + 1, self.rows.items.len },
+        " {s} | {d}/{d} ",
+        .{
+            if (self.syntax) |syntax| syntax.filetype else "no ft",
+            self.cursor.y + 1,
+            self.rows.items.len,
+        },
     );
 
     try self.append_buffer.appendSlice(self.allocator, left_status);
-    if (self.screen.cols >= left_status.len + right_status.len + 1) {
+    if (self.screen.cols >= left_status.len + right_status.len) {
         try self.append_buffer.appendNTimes(
             self.allocator,
             ' ',
