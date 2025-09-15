@@ -1,10 +1,16 @@
 const std = @import("std");
 const posix = std.posix;
 
+const ansi = @import("ansi.zig");
 const linux = @import("linux.zig");
+const Row = @import("Row.zig");
 const stdio = @import("stdio.zig");
 const stdin = stdio.stdin;
 const stdout = stdio.stdout;
+const syn = @import("syntax.zig");
+const Syntax = syn.Syntax;
+const Highlight = syn.Highlight;
+const Color = syn.Color;
 
 const Editor = @This();
 
@@ -14,46 +20,7 @@ const version: std.SemanticVersion = .{
     .patch = 1,
 };
 
-const tab_stop = 8;
 const presses_before_quit = 3;
-
-const Ansi = struct {
-    const esc = "\x1b";
-    const esc_seq = esc ++ "[";
-    const clear_screen = esc_seq ++ "2J";
-    const clear_line = esc_seq ++ "K";
-    const cursor_top = esc_seq ++ "H";
-    const cursor_bottom = esc_seq ++ "999C";
-    const cursor_right = esc_seq ++ "999B";
-    const cursor_position = esc_seq ++ "6n";
-    const cursor_hide = esc_seq ++ "?25l";
-    const cursor_show = esc_seq ++ "?25h";
-    const invert_colors = esc_seq ++ "7m";
-    const normal_colors = esc_seq ++ "m";
-    const fg_color_default = esc_seq ++ "39m";
-    const fg_color_red = esc_seq ++ "31m";
-    const fg_color_blue = esc_seq ++ "34m";
-    const fg_color_green = esc_seq ++ "32m";
-    const fg_color_cyan = esc_seq ++ "36m";
-};
-
-const Color = enum {
-    default,
-    red,
-    blue,
-    green,
-    cyan,
-
-    fn toAnsi(self: Color) []const u8 {
-        return switch (self) {
-            .default => Ansi.fg_color_default,
-            .red => Ansi.fg_color_red,
-            .blue => Ansi.fg_color_blue,
-            .green => Ansi.fg_color_green,
-            .cyan => Ansi.fg_color_cyan,
-        };
-    }
-};
 
 pub const Screen = struct {
     rows: usize,
@@ -91,191 +58,6 @@ const Key = enum(u8) {
     }
 };
 
-const Highlight = enum {
-    normal,
-    number,
-    match,
-    string,
-    comment,
-
-    fn toColor(self: Highlight) Color {
-        return switch (self) {
-            .normal => .default,
-            .number => .red,
-            .match => .blue,
-            .string => .green,
-            .comment => .cyan,
-        };
-    }
-};
-
-const Syntax = struct {
-    const Flags = packed struct {
-        numbers: bool,
-        strings: bool,
-    };
-
-    filetype: []const u8,
-    filematch: []const []const u8,
-    single_line_comment: []const u8,
-    flags: Flags,
-
-    const c_extensions = &.{ ".c", ".h", ".cpp" };
-    const zig_extensions = &.{".zig"};
-};
-
-const highlight_db: []const Syntax = &.{ .{
-    .filetype = "c",
-    .filematch = Syntax.c_extensions,
-    .single_line_comment = "//",
-    .flags = .{
-        .numbers = true,
-        .strings = true,
-    },
-}, .{
-    .filetype = "zig",
-    .filematch = Syntax.zig_extensions,
-    .single_line_comment = "//",
-    .flags = .{
-        .numbers = true,
-        .strings = true,
-    },
-} };
-
-fn isSeparator(char: u8) bool {
-    return std.ascii.isWhitespace(char) or
-        std.mem.indexOfScalar(u8, ",.()+-/*=~%<>[];", char) != null;
-}
-
-const Row = struct {
-    chars: std.ArrayList(u8),
-    render: std.ArrayList(u8),
-    highlight: std.ArrayList(Highlight),
-
-    fn update(self: *Row, allocator: std.mem.Allocator, maybe_syntax: ?Syntax) !void {
-        self.render.clearRetainingCapacity();
-
-        for (self.chars.items) |char| {
-            if (char == '\t') {
-                const count = tab_stop - (self.render.items.len % tab_stop);
-                try self.render.appendNTimes(allocator, ' ', count);
-            } else {
-                try self.render.append(allocator, char);
-            }
-        }
-
-        try self.updateSyntax(allocator, maybe_syntax);
-    }
-
-    fn updateSyntax(self: *Row, allocator: std.mem.Allocator, maybe_syntax: ?Syntax) !void {
-        self.highlight.clearRetainingCapacity();
-        try self.highlight.appendNTimes(allocator, .normal, self.render.items.len);
-
-        const syntax = maybe_syntax orelse return;
-
-        var prev_separator = true;
-        var in_string: ?u8 = null;
-
-        var i: usize = 0;
-        while (i < self.render.items.len) {
-            const char = self.render.items[i];
-            const prev_hl = if (i > 0) self.highlight.items[i - 1] else .normal;
-
-            if (in_string == null and syntax.single_line_comment.len > 0) {
-                if (std.mem.startsWith(u8, self.render.items[i..], syntax.single_line_comment)) {
-                    @memset(self.highlight.items[i..], .comment);
-                    break;
-                }
-            }
-
-            if (syntax.flags.strings) {
-                if (in_string) |delim| {
-                    self.highlight.items[i] = .string;
-                    if (char == '\\' and i + 1 < self.render.items.len) {
-                        self.highlight.items[i + 1] = .string;
-                        i += 2;
-                        continue;
-                    }
-                    if (char == delim) in_string = null;
-                    i += 1;
-                    prev_separator = true;
-                    continue;
-                } else if (char == '"' or char == '\'') {
-                    in_string = char;
-                    self.highlight.items[i] = .string;
-                    i += 1;
-                    continue;
-                }
-            }
-
-            if (syntax.flags.numbers) {
-                if (std.ascii.isDigit(char) and
-                    (prev_separator or prev_hl == .number) or
-                    (char == '.' and prev_hl == .number))
-                {
-                    self.highlight.items[i] = .number;
-                    i += 1;
-                    prev_separator = false;
-                    continue;
-                }
-            }
-
-            prev_separator = isSeparator(char);
-            i += 1;
-        }
-    }
-
-    fn insertChar(
-        self: *Row,
-        allocator: std.mem.Allocator,
-        maybe_syntax: ?Syntax,
-        at: usize,
-        char: u8,
-    ) !void {
-        const index = @min(at, self.chars.items.len);
-        try self.chars.insert(allocator, index, char);
-        try self.update(allocator, maybe_syntax);
-    }
-
-    fn deleteChar(self: *Row, allocator: std.mem.Allocator, maybe_syntax: ?Syntax, at: usize) !void {
-        const index = @min(at, self.chars.items.len -| 1);
-        _ = self.chars.orderedRemove(index);
-        try self.update(allocator, maybe_syntax);
-    }
-
-    fn appendString(self: *Row, allocator: std.mem.Allocator, maybe_syntax: ?Syntax, str: []const u8) !void {
-        try self.chars.appendSlice(allocator, str);
-        try self.update(allocator, maybe_syntax);
-    }
-
-    fn cxToRx(self: *const Row, cx: usize) usize {
-        var rx: usize = 0;
-        for (0..cx) |idx| {
-            const char = self.chars.items[idx];
-            if (char == '\t')
-                rx += (tab_stop - 1) - (rx % tab_stop);
-            rx += 1;
-        }
-        return rx;
-    }
-
-    fn rxToCx(self: *const Row, rx: usize) usize {
-        var cur_rx: usize = 0;
-        var cx: usize = 0;
-        for (self.chars.items) |char| {
-            if (char == '\t')
-                cur_rx += (tab_stop - 1) - (cur_rx % tab_stop);
-            cur_rx += 1;
-
-            if (cur_rx > rx) return cx;
-
-            cx += 1;
-        }
-
-        return cx;
-    }
-};
-
 allocator: std.mem.Allocator,
 append_buffer: std.ArrayList(u8),
 screen: Screen,
@@ -294,7 +76,7 @@ syntax: ?Syntax,
 pub fn init(allocator: std.mem.Allocator) !Editor {
     const winsize: linux.WinSize = linux.getWindowSize() catch blk: {
         // fallback method
-        try stdout.writeAll(Ansi.cursor_bottom ++ Ansi.cursor_right);
+        try stdout.writeAll(ansi.cursor_bottom ++ ansi.cursor_right);
         try stdout.flush();
 
         const pos = try getCursorPosition();
@@ -339,25 +121,25 @@ pub fn deinit(self: *Editor) void {
 }
 
 pub fn clearScreen(_: *const Editor) !void {
-    try stdout.writeAll(Ansi.clear_screen ++ Ansi.cursor_top);
+    try stdout.writeAll(ansi.clear_screen ++ ansi.cursor_top);
     try stdout.flush();
 }
 
 pub fn refreshScreen(self: *Editor) !void {
     self.scroll();
 
-    try self.append_buffer.appendSlice(self.allocator, Ansi.cursor_hide ++ Ansi.cursor_top);
+    try self.append_buffer.appendSlice(self.allocator, ansi.cursor_hide ++ ansi.cursor_top);
 
     try self.drawRows();
     try self.drawStatusBar();
     try self.drawMessageBar();
 
-    try self.append_buffer.print(self.allocator, Ansi.esc_seq ++ "{d};{d}H", .{
+    try self.append_buffer.print(self.allocator, ansi.esc_seq ++ "{d};{d}H", .{
         (self.cursor.y - self.row_offset) + 1,
         (self.rx - self.col_offset) + 1,
     });
 
-    try self.append_buffer.appendSlice(self.allocator, Ansi.cursor_show);
+    try self.append_buffer.appendSlice(self.allocator, ansi.cursor_show);
 
     try stdout.writeAll(self.append_buffer.items);
     try stdout.flush();
@@ -386,7 +168,7 @@ pub fn processKeypress(self: *Editor, quit: *bool) !void {
             }
 
             quit.* = true;
-            try stdout.writeAll(Ansi.clear_screen ++ Ansi.cursor_top);
+            try stdout.writeAll(ansi.clear_screen ++ ansi.cursor_top);
             try stdout.flush();
         },
         .ctrl_s => try self.save(),
@@ -456,7 +238,7 @@ fn selectSyntaxHighlight(self: *Editor) !void {
     const filename = self.filename orelse return;
 
     const ext = std.fs.path.extension(filename);
-    for (highlight_db) |entry| {
+    for (syn.highlight_db) |entry| {
         for (entry.filematch) |filematch| {
             const is_ext = filematch[0] == '.';
             if (is_ext and std.mem.eql(u8, ext, filematch)) {
@@ -780,7 +562,7 @@ fn drawRows(self: *Editor) !void {
                 switch (hl) {
                     .normal => {
                         if (current_color != .default) {
-                            try self.append_buffer.appendSlice(self.allocator, Ansi.fg_color_default);
+                            try self.append_buffer.appendSlice(self.allocator, ansi.fg_color_default);
                             current_color = .default;
                         }
                         try self.append_buffer.append(self.allocator, char);
@@ -795,16 +577,16 @@ fn drawRows(self: *Editor) !void {
                     },
                 }
             }
-            try self.append_buffer.appendSlice(self.allocator, Ansi.fg_color_default);
+            try self.append_buffer.appendSlice(self.allocator, ansi.fg_color_default);
         }
 
-        try self.append_buffer.appendSlice(self.allocator, Ansi.clear_line);
+        try self.append_buffer.appendSlice(self.allocator, ansi.clear_line);
         try self.append_buffer.appendSlice(self.allocator, "\r\n");
     }
 }
 
 fn drawStatusBar(self: *Editor) !void {
-    try self.append_buffer.appendSlice(self.allocator, Ansi.invert_colors);
+    try self.append_buffer.appendSlice(self.allocator, ansi.invert_colors);
 
     var left_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const left_str = try std.fmt.bufPrint(
@@ -841,12 +623,12 @@ fn drawStatusBar(self: *Editor) !void {
         try self.append_buffer.appendNTimes(self.allocator, ' ', self.screen.cols -| left_status.len);
     }
 
-    try self.append_buffer.appendSlice(self.allocator, Ansi.normal_colors);
+    try self.append_buffer.appendSlice(self.allocator, ansi.normal_colors);
     try self.append_buffer.appendSlice(self.allocator, "\r\n");
 }
 
 fn drawMessageBar(self: *Editor) !void {
-    try self.append_buffer.appendSlice(self.allocator, Ansi.clear_line);
+    try self.append_buffer.appendSlice(self.allocator, ansi.clear_line);
     const len = @min(self.status_msg.len, self.screen.cols);
     if (std.time.timestamp() - self.status_msg_time < 5) {
         try self.append_buffer.appendSlice(self.allocator, self.status_msg[0..len]);
@@ -862,10 +644,10 @@ fn readKey() !Key {
             };
         };
 
-        if (char == Ansi.esc_seq[0]) {
+        if (char == ansi.esc_seq[0]) {
             var seq: [3]u8 = undefined;
-            seq[0] = stdin.takeByte() catch return @enumFromInt(Ansi.esc[0]);
-            seq[1] = stdin.takeByte() catch return @enumFromInt(Ansi.esc[0]);
+            seq[0] = stdin.takeByte() catch return @enumFromInt(ansi.esc[0]);
+            seq[1] = stdin.takeByte() catch return @enumFromInt(ansi.esc[0]);
 
             switch (seq[0]) {
                 '[' => switch (seq[1]) {
@@ -897,7 +679,7 @@ fn readKey() !Key {
                     'H' => return .home,
                     else => {},
                 },
-                else => return @enumFromInt(Ansi.esc_seq[0]),
+                else => return @enumFromInt(ansi.esc_seq[0]),
             }
         }
 
@@ -906,7 +688,7 @@ fn readKey() !Key {
 }
 
 fn getCursorPosition() !Screen {
-    try stdout.writeAll(Ansi.cursor_position);
+    try stdout.writeAll(ansi.cursor_position);
     try stdout.flush();
 
     var buffer: [32]u8 = undefined;
@@ -922,10 +704,10 @@ fn getCursorPosition() !Screen {
         try array.appendBounded(char);
     }
 
-    if (!std.mem.eql(u8, array.items[0..Ansi.esc_seq.len], Ansi.esc_seq))
+    if (!std.mem.eql(u8, array.items[0..ansi.esc_seq.len], ansi.esc_seq))
         return error.InvalidCursorPosition;
 
-    const cursor_pos_raw = array.items[Ansi.esc_seq.len..];
+    const cursor_pos_raw = array.items[ansi.esc_seq.len..];
     const rows_raw = std.mem.sliceTo(cursor_pos_raw, ';');
     const cols_raw = cursor_pos_raw[rows_raw.len + 1 ..];
 

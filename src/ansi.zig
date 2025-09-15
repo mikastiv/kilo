@@ -1,0 +1,17 @@
+pub const esc = "\x1b";
+pub const esc_seq = esc ++ "[";
+pub const clear_screen = esc_seq ++ "2J";
+pub const clear_line = esc_seq ++ "K";
+pub const cursor_top = esc_seq ++ "H";
+pub const cursor_bottom = esc_seq ++ "999C";
+pub const cursor_right = esc_seq ++ "999B";
+pub const cursor_position = esc_seq ++ "6n";
+pub const cursor_hide = esc_seq ++ "?25l";
+pub const cursor_show = esc_seq ++ "?25h";
+pub const invert_colors = esc_seq ++ "7m";
+pub const normal_colors = esc_seq ++ "m";
+pub const fg_color_default = esc_seq ++ "39m";
+pub const fg_color_red = esc_seq ++ "31m";
+pub const fg_color_blue = esc_seq ++ "34m";
+pub const fg_color_green = esc_seq ++ "32m";
+pub const fg_color_cyan = esc_seq ++ "36m";
