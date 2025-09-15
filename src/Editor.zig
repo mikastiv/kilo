@@ -33,18 +33,24 @@ const Ansi = struct {
     const fg_color_default = esc_seq ++ "39m";
     const fg_color_red = esc_seq ++ "31m";
     const fg_color_blue = esc_seq ++ "34m";
+    const fg_color_green = esc_seq ++ "32m";
+    const fg_color_cyan = esc_seq ++ "36m";
 };
 
 const Color = enum {
     default,
     red,
     blue,
+    green,
+    cyan,
 
     fn toAnsi(self: Color) []const u8 {
         return switch (self) {
             .default => Ansi.fg_color_default,
             .red => Ansi.fg_color_red,
             .blue => Ansi.fg_color_blue,
+            .green => Ansi.fg_color_green,
+            .cyan => Ansi.fg_color_cyan,
         };
     }
 };
@@ -89,12 +95,16 @@ const Highlight = enum {
     normal,
     number,
     match,
+    string,
+    comment,
 
     fn toColor(self: Highlight) Color {
         return switch (self) {
             .normal => .default,
             .number => .red,
             .match => .blue,
+            .string => .green,
+            .comment => .cyan,
         };
     }
 };
@@ -102,10 +112,12 @@ const Highlight = enum {
 const Syntax = struct {
     const Flags = packed struct {
         numbers: bool,
+        strings: bool,
     };
 
     filetype: []const u8,
     filematch: []const []const u8,
+    single_line_comment: []const u8,
     flags: Flags,
 
     const c_extensions = &.{ ".c", ".h", ".cpp" };
@@ -115,11 +127,19 @@ const Syntax = struct {
 const highlight_db: []const Syntax = &.{ .{
     .filetype = "c",
     .filematch = Syntax.c_extensions,
-    .flags = .{ .numbers = true },
+    .single_line_comment = "//",
+    .flags = .{
+        .numbers = true,
+        .strings = true,
+    },
 }, .{
     .filetype = "zig",
     .filematch = Syntax.zig_extensions,
-    .flags = .{ .numbers = true },
+    .single_line_comment = "//",
+    .flags = .{
+        .numbers = true,
+        .strings = true,
+    },
 } };
 
 fn isSeparator(char: u8) bool {
@@ -154,11 +174,39 @@ const Row = struct {
         const syntax = maybe_syntax orelse return;
 
         var prev_separator = true;
+        var in_string: ?u8 = null;
 
         var i: usize = 0;
         while (i < self.render.items.len) {
             const char = self.render.items[i];
             const prev_hl = if (i > 0) self.highlight.items[i - 1] else .normal;
+
+            if (in_string == null and syntax.single_line_comment.len > 0) {
+                if (std.mem.startsWith(u8, self.render.items[i..], syntax.single_line_comment)) {
+                    @memset(self.highlight.items[i..], .comment);
+                    break;
+                }
+            }
+
+            if (syntax.flags.strings) {
+                if (in_string) |delim| {
+                    self.highlight.items[i] = .string;
+                    if (char == '\\' and i + 1 < self.render.items.len) {
+                        self.highlight.items[i + 1] = .string;
+                        i += 2;
+                        continue;
+                    }
+                    if (char == delim) in_string = null;
+                    i += 1;
+                    prev_separator = true;
+                    continue;
+                } else if (char == '"' or char == '\'') {
+                    in_string = char;
+                    self.highlight.items[i] = .string;
+                    i += 1;
+                    continue;
+                }
+            }
 
             if (syntax.flags.numbers) {
                 if (std.ascii.isDigit(char) and
@@ -737,7 +785,7 @@ fn drawRows(self: *Editor) !void {
                         }
                         try self.append_buffer.append(self.allocator, char);
                     },
-                    .number, .match => {
+                    .number, .match, .string, .comment => {
                         const color = hl.toColor();
                         if (color != current_color) {
                             try self.append_buffer.appendSlice(self.allocator, color.toAnsi());
