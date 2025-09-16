@@ -32,12 +32,13 @@ pub fn updateSyntax(self: *Row, allocator: std.mem.Allocator, maybe_syntax: ?Syn
     try self.highlight.appendNTimes(allocator, .normal, self.render.items.len);
 
     const syntax = maybe_syntax orelse return;
+    const keywords = syntax.keywords;
 
     var prev_separator = true;
     var in_string: ?u8 = null;
 
     var i: usize = 0;
-    while (i < self.render.items.len) {
+    loop: while (i < self.render.items.len) {
         const char = self.render.items[i];
         const prev_hl = if (i > 0) self.highlight.items[i - 1] else .normal;
         const prev_char = if (i > 0) self.render.items[i - 1] else 0;
@@ -92,6 +93,26 @@ pub fn updateSyntax(self: *Row, allocator: std.mem.Allocator, maybe_syntax: ?Syn
                 i += 1;
                 prev_separator = false;
                 continue;
+            }
+        }
+
+        if (prev_separator) {
+            for (keywords) |kw| {
+                const secondary = kw[kw.len - 1] == '|';
+                const keyword = if (secondary) kw[0 .. kw.len - 1] else kw;
+                const slice = self.render.items[i..];
+                if (std.mem.startsWith(u8, slice, keyword)) {
+                    const end_char = if (slice.len > keyword.len) slice[keyword.len] else 0;
+                    if (isSeparator(end_char)) {
+                        @memset(
+                            self.highlight.items[i .. i + keyword.len],
+                            if (secondary) .keyword2 else .keyword1,
+                        );
+                        i += keyword.len;
+                        prev_separator = false;
+                        continue :loop;
+                    }
+                }
             }
         }
 
@@ -152,5 +173,5 @@ pub fn rxToCx(self: *const Row, rx: usize) usize {
 
 fn isSeparator(char: u8) bool {
     return std.ascii.isWhitespace(char) or
-        std.mem.indexOfScalar(u8, ",.()+-/*=~%<>[];", char) != null;
+        std.mem.indexOfScalar(u8, ",.()+-/*=~%<>[];!?", char) != null;
 }

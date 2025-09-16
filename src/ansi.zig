@@ -15,3 +15,5 @@ pub const fg_color_red = esc_seq ++ "31m";
 pub const fg_color_blue = esc_seq ++ "34m";
 pub const fg_color_green = esc_seq ++ "32m";
 pub const fg_color_cyan = esc_seq ++ "36m";
+pub const fg_color_magenta = esc_seq ++ "35m";
+pub const fg_color_yellow = esc_seq ++ "33m";

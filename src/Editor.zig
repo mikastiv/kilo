@@ -567,7 +567,7 @@ fn drawRows(self: *Editor) !void {
                         }
                         try self.append_buffer.append(self.allocator, char);
                     },
-                    .number, .match, .string, .comment => {
+                    .number, .match, .string, .comment, .keyword1, .keyword2 => {
                         const color = hl.toColor();
                         if (color != current_color) {
                             try self.append_buffer.appendSlice(self.allocator, color.toAnsi());
