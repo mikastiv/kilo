@@ -40,6 +40,8 @@ pub fn updateSyntax(self: *Row, allocator: std.mem.Allocator, maybe_syntax: ?Syn
     while (i < self.render.items.len) {
         const char = self.render.items[i];
         const prev_hl = if (i > 0) self.highlight.items[i - 1] else .normal;
+        const prev_char = if (i > 0) self.render.items[i - 1] else 0;
+        const next_char = if (i + 1 < self.render.items.len) self.render.items[i + 1] else 0;
 
         if (in_string == null and syntax.single_line_comment.len > 0) {
             if (std.mem.startsWith(u8, self.render.items[i..], syntax.single_line_comment)) {
@@ -69,10 +71,23 @@ pub fn updateSyntax(self: *Row, allocator: std.mem.Allocator, maybe_syntax: ?Syn
         }
 
         if (syntax.flags.numbers) {
-            if (std.ascii.isDigit(char) and
+            const condition1 =
+                std.ascii.isDigit(char) and
                 (prev_separator or prev_hl == .number) or
-                (char == '.' and prev_hl == .number))
-            {
+                (char == '.' and prev_hl == .number and std.ascii.isDigit(next_char)) or
+                ((prev_char == 'x' or prev_char == 'X') and prev_hl == .number);
+
+            const condition2 = (char == 'x' or char == 'X') and prev_char == '0';
+
+            const condition3 =
+                prev_hl == .number and
+                std.mem.indexOfScalar(
+                    u8,
+                    std.ascii.HexEscape.lower_charset,
+                    std.ascii.toLower(char),
+                ) != null;
+
+            if (condition1 or condition2 or condition3) {
                 self.highlight.items[i] = .number;
                 i += 1;
                 prev_separator = false;
