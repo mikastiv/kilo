@@ -6,6 +6,7 @@ pub const Highlight = enum {
     match,
     string,
     comment,
+    ml_comment,
     keyword1,
     keyword2,
 
@@ -15,7 +16,7 @@ pub const Highlight = enum {
             .number => .red,
             .match => .blue,
             .string => .green,
-            .comment => .cyan,
+            .comment, .ml_comment => .cyan,
             .keyword1 => .yellow,
             .keyword2 => .magenta,
         };
@@ -32,6 +33,8 @@ pub const Syntax = struct {
     filematch: []const []const u8,
     keywords: []const []const u8,
     single_line_comment: []const u8,
+    multiline_comment_start: ?[]const u8,
+    multiline_comment_end: ?[]const u8,
     flags: Flags,
 };
 
@@ -65,6 +68,8 @@ pub const highlight_db: []const Syntax = &.{ .{
         "void|",
     },
     .single_line_comment = "//",
+    .multiline_comment_start = "/*",
+    .multiline_comment_end = "*/",
     .flags = .{
         .numbers = true,
         .strings = true,
@@ -116,6 +121,8 @@ pub const highlight_db: []const Syntax = &.{ .{
         "i64|",
     },
     .single_line_comment = "//",
+    .multiline_comment_start = null,
+    .multiline_comment_end = null,
     .flags = .{
         .numbers = true,
         .strings = true,

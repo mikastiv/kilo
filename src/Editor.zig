@@ -11,6 +11,7 @@ const syn = @import("syntax.zig");
 const Syntax = syn.Syntax;
 const Highlight = syn.Highlight;
 const Color = syn.Color;
+const config = @import("config.zig");
 
 const Editor = @This();
 
@@ -19,8 +20,6 @@ const version: std.SemanticVersion = .{
     .minor = 0,
     .patch = 1,
 };
-
-const presses_before_quit = 3;
 
 pub const Screen = struct {
     rows: usize,
@@ -110,9 +109,7 @@ pub fn init(allocator: std.mem.Allocator) !Editor {
 pub fn deinit(self: *Editor) void {
     self.append_buffer.deinit(self.allocator);
     for (self.rows.items) |*row| {
-        row.chars.deinit(self.allocator);
-        row.render.deinit(self.allocator);
-        row.highlight.deinit(self.allocator);
+        row.deinit(self.allocator);
     }
     self.rows.deinit(self.allocator);
     if (self.filename) |filename| {
@@ -149,7 +146,7 @@ pub fn refreshScreen(self: *Editor) !void {
 
 pub fn processKeypress(self: *Editor, quit: *bool) !void {
     const S = struct {
-        var quit_times: u32 = presses_before_quit;
+        var quit_times: u32 = config.presses_before_quit;
     };
 
     const char = try readKey();
@@ -199,7 +196,7 @@ pub fn processKeypress(self: *Editor, quit: *bool) !void {
         else => try self.insertChar(@intFromEnum(char)),
     }
 
-    S.quit_times = presses_before_quit;
+    S.quit_times = config.presses_before_quit;
 }
 
 pub fn openFile(self: *Editor, filename: []const u8) !void {
@@ -244,7 +241,7 @@ fn selectSyntaxHighlight(self: *Editor) !void {
             if (is_ext and std.mem.eql(u8, ext, filematch)) {
                 self.syntax = entry;
                 for (self.rows.items) |*row| {
-                    try row.updateSyntax(self.allocator, self.syntax);
+                    try self.rowUpdateSyntax(row);
                 }
                 return;
             }
@@ -407,13 +404,160 @@ fn rowsToString(self: *const Editor) ![]u8 {
     return try buffer.toOwnedSlice(self.allocator);
 }
 
+fn rowUpdate(self: *Editor, row: *Row) !void {
+    row.render.clearRetainingCapacity();
+
+    for (row.chars.items) |char| {
+        if (char == '\t') {
+            const count = config.tab_stop - (row.render.items.len % config.tab_stop);
+            try row.render.appendNTimes(self.allocator, ' ', count);
+        } else {
+            try row.render.append(self.allocator, char);
+        }
+    }
+
+    try self.rowUpdateSyntax(row);
+}
+
+fn rowUpdateSyntax(self: *Editor, row: *Row) !void {
+    row.highlight.clearRetainingCapacity();
+    try row.highlight.appendNTimes(self.allocator, .normal, row.render.items.len);
+
+    const syntax = self.syntax orelse return;
+    const keywords = syntax.keywords;
+
+    const mlc_start = syntax.multiline_comment_start orelse "";
+    const mlc_end = syntax.multiline_comment_end orelse "";
+
+    var prev_separator = true;
+    var in_string: ?u8 = null;
+    var in_comment = if (row.idx > 0) self.rows.items[row.idx - 1].hl_open_comment else false;
+
+    var i: usize = 0;
+    loop: while (i < row.render.items.len) {
+        const char = row.render.items[i];
+        const prev_hl = if (i > 0) row.highlight.items[i - 1] else .normal;
+        const prev_char = if (i > 0) row.render.items[i - 1] else 0;
+        const next_char = if (i + 1 < row.render.items.len) row.render.items[i + 1] else 0;
+
+        if (in_string == null and syntax.single_line_comment.len > 0 and !in_comment) {
+            if (std.mem.startsWith(u8, row.render.items[i..], syntax.single_line_comment)) {
+                @memset(row.highlight.items[i..], .comment);
+                break;
+            }
+        }
+
+        if (mlc_start.len > 0 and mlc_end.len > 0 and in_string == null) {
+            const slice = row.render.items[i..];
+            if (in_comment) {
+                row.highlight.items[i] = .ml_comment;
+                if (std.mem.startsWith(u8, slice, mlc_end)) {
+                    @memset(row.highlight.items[i .. i + mlc_end.len], .ml_comment);
+                    i += mlc_end.len;
+                    in_comment = false;
+                    prev_separator = true;
+                } else {
+                    i += 1;
+                }
+                continue;
+            } else if (std.mem.startsWith(u8, slice, mlc_start)) {
+                @memset(row.highlight.items[i .. i + mlc_start.len], .ml_comment);
+                i += mlc_start.len;
+                in_comment = true;
+                continue;
+            }
+        }
+
+        if (syntax.flags.strings) {
+            if (in_string) |delim| {
+                row.highlight.items[i] = .string;
+                if (char == '\\' and i + 1 < row.render.items.len) {
+                    row.highlight.items[i + 1] = .string;
+                    i += 2;
+                    continue;
+                }
+                if (char == delim) in_string = null;
+                i += 1;
+                prev_separator = true;
+                continue;
+            } else if (char == '"' or char == '\'') {
+                in_string = char;
+                row.highlight.items[i] = .string;
+                i += 1;
+                continue;
+            }
+        }
+
+        if (syntax.flags.numbers) {
+            const condition1 =
+                std.ascii.isDigit(char) and
+                (prev_separator or prev_hl == .number) or
+                (char == '.' and prev_hl == .number and std.ascii.isDigit(next_char)) or
+                ((prev_char == 'x' or prev_char == 'X') and prev_hl == .number);
+
+            const condition2 = (char == 'x' or char == 'X') and prev_char == '0';
+
+            const condition3 =
+                prev_hl == .number and
+                std.mem.indexOfScalar(
+                    u8,
+                    std.ascii.HexEscape.lower_charset,
+                    std.ascii.toLower(char),
+                ) != null;
+
+            if (condition1 or condition2 or condition3) {
+                row.highlight.items[i] = .number;
+                i += 1;
+                prev_separator = false;
+                continue;
+            }
+        }
+
+        if (prev_separator) {
+            for (keywords) |kw| {
+                const secondary = kw[kw.len - 1] == '|';
+                const keyword = if (secondary) kw[0 .. kw.len - 1] else kw;
+                const slice = row.render.items[i..];
+                if (std.mem.startsWith(u8, slice, keyword)) {
+                    const end_char = if (slice.len > keyword.len) slice[keyword.len] else 0;
+                    if (isSeparator(end_char)) {
+                        @memset(
+                            row.highlight.items[i .. i + keyword.len],
+                            if (secondary) .keyword2 else .keyword1,
+                        );
+                        i += keyword.len;
+                        prev_separator = false;
+                        continue :loop;
+                    }
+                }
+            }
+        }
+
+        prev_separator = isSeparator(char);
+        i += 1;
+    }
+
+    const changed = row.hl_open_comment != in_comment;
+    row.hl_open_comment = in_comment;
+    if (changed and row.idx + 1 < self.rows.items.len) {
+        try self.rowUpdateSyntax(&self.rows.items[row.idx + 1]);
+    }
+}
+
+fn isSeparator(char: u8) bool {
+    return std.ascii.isWhitespace(char) or
+        std.mem.indexOfScalar(u8, ",.()+-/*=~%<>[];!?", char) != null;
+}
+
 fn insertChar(self: *Editor, char: u8) !void {
     if (self.cursor.y == self.rows.items.len) {
         try self.insertRow(self.rows.items.len, "");
     }
 
     const row = self.currentRow().?;
-    try row.insertChar(self.allocator, self.syntax, self.cursor.x, char);
+    const index = @min(self.cursor.x, row.chars.items.len);
+    try row.chars.insert(self.allocator, index, char);
+    try self.rowUpdate(row);
     self.cursor.x += 1;
     self.dirty += 1;
 }
@@ -424,12 +568,15 @@ fn deleteChar(self: *Editor) !void {
 
     const row = self.currentRow().?;
     if (self.cursor.x > 0) {
-        try row.deleteChar(self.allocator, self.syntax, self.cursor.x - 1);
+        const index = @min(self.cursor.x - 1, row.chars.items.len -| 1);
+        _ = row.chars.orderedRemove(index);
+        try self.rowUpdate(row);
         self.cursor.x -= 1;
     } else {
         const prev_row = &self.rows.items[self.cursor.y - 1];
         self.cursor.x = prev_row.chars.items.len;
-        try prev_row.appendString(self.allocator, self.syntax, row.chars.items);
+        try prev_row.chars.appendSlice(self.allocator, row.chars.items);
+        try self.rowUpdate(prev_row);
         self.deleteRow(self.cursor.y);
         self.cursor.y -= 1;
     }
@@ -445,7 +592,7 @@ fn insertNewline(self: *Editor) !void {
         try self.insertRow(self.cursor.y + 1, row.chars.items[self.cursor.x..]);
         row = self.currentRow().?;
         row.chars.shrinkRetainingCapacity(self.cursor.x);
-        try row.update(self.allocator, self.syntax);
+        try self.rowUpdate(row);
     }
 
     self.cursor.y += 1;
@@ -455,20 +602,31 @@ fn insertNewline(self: *Editor) !void {
 fn insertRow(self: *Editor, at: usize, str: []const u8) !void {
     if (at > self.rows.items.len) return;
 
-    try self.rows.insert(self.allocator, at, .{ .chars = .empty, .render = .empty, .highlight = .empty });
+    try self.rows.insert(self.allocator, at, .{
+        .chars = .empty,
+        .render = .empty,
+        .highlight = .empty,
+        .idx = at,
+        .hl_open_comment = false,
+    });
+    for (self.rows.items[at + 1 ..]) |*row| {
+        row.idx += 1;
+    }
 
     const row = &self.rows.items[at];
     try row.chars.appendSlice(self.allocator, str);
-    try row.update(self.allocator, self.syntax);
+    try self.rowUpdate(row);
 
     self.dirty += 1;
 }
 
 fn deleteRow(self: *Editor, at: usize) void {
     const index = @min(at, self.rows.items.len -| 1);
-    var row = self.rows.orderedRemove(index);
-    row.chars.deinit(self.allocator);
-    row.render.deinit(self.allocator);
+    var deleted = self.rows.orderedRemove(index);
+    deleted.deinit(self.allocator);
+    for (self.rows.items[at..]) |*row| {
+        row.idx -= 1;
+    }
     self.dirty += 1;
 }
 
@@ -559,22 +717,31 @@ fn drawRows(self: *Editor) !void {
             const highlight = row.highlight.items[index .. index + len];
             var current_color: Color = .default;
             for (line, highlight) |char, hl| {
-                switch (hl) {
-                    .normal => {
-                        if (current_color != .default) {
-                            try self.append_buffer.appendSlice(self.allocator, ansi.fg_color_default);
-                            current_color = .default;
-                        }
-                        try self.append_buffer.append(self.allocator, char);
-                    },
-                    .number, .match, .string, .comment, .keyword1, .keyword2 => {
-                        const color = hl.toColor();
-                        if (color != current_color) {
-                            try self.append_buffer.appendSlice(self.allocator, color.toAnsi());
-                            current_color = color;
-                        }
-                        try self.append_buffer.append(self.allocator, char);
-                    },
+                if (std.ascii.isControl(char)) {
+                    const symbol = if (char <= 26) '@' + char else '?';
+                    try self.append_buffer.appendSlice(self.allocator, ansi.invert_colors);
+                    try self.append_buffer.append(self.allocator, symbol);
+                    try self.append_buffer.appendSlice(self.allocator, ansi.normal_colors);
+                    if (current_color != .default)
+                        try self.append_buffer.appendSlice(self.allocator, hl.toColor().toAnsi());
+                } else {
+                    switch (hl) {
+                        .normal => {
+                            if (current_color != .default) {
+                                try self.append_buffer.appendSlice(self.allocator, ansi.fg_color_default);
+                                current_color = .default;
+                            }
+                            try self.append_buffer.append(self.allocator, char);
+                        },
+                        else => {
+                            const color = hl.toColor();
+                            if (color != current_color) {
+                                try self.append_buffer.appendSlice(self.allocator, color.toAnsi());
+                                current_color = color;
+                            }
+                            try self.append_buffer.append(self.allocator, char);
+                        },
+                    }
                 }
             }
             try self.append_buffer.appendSlice(self.allocator, ansi.fg_color_default);
