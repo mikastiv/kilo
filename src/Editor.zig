@@ -5,8 +5,6 @@ const ansi = @import("ansi.zig");
 const linux = @import("linux.zig");
 const Row = @import("Row.zig");
 const stdio = @import("stdio.zig");
-const stdin = stdio.stdin;
-const stdout = stdio.stdout;
 const syn = @import("syntax.zig");
 const Syntax = syn.Syntax;
 const Highlight = syn.Highlight;
@@ -58,6 +56,7 @@ const Key = enum(u8) {
 };
 
 allocator: std.mem.Allocator,
+io: std.Io,
 append_buffer: std.ArrayList(u8),
 screen: Screen,
 cursor: Pos,
@@ -72,11 +71,11 @@ status_msg_time: i64,
 dirty: u32,
 syntax: ?Syntax,
 
-pub fn init(allocator: std.mem.Allocator) !Editor {
+pub fn init(allocator: std.mem.Allocator, io: std.Io) !Editor {
     const winsize: linux.WinSize = linux.getWindowSize() catch blk: {
         // fallback method
-        try stdout.writeAll(ansi.cursor_bottom ++ ansi.cursor_right);
-        try stdout.flush();
+        try stdio.stdout.writeAll(ansi.cursor_bottom ++ ansi.cursor_right);
+        try stdio.stdout.flush();
 
         const pos = try getCursorPosition();
         break :blk .{
@@ -87,6 +86,7 @@ pub fn init(allocator: std.mem.Allocator) !Editor {
 
     return .{
         .allocator = allocator,
+        .io = io,
         .append_buffer = .empty,
         .screen = .{
             .rows = winsize.rows -| 2,
@@ -118,8 +118,8 @@ pub fn deinit(self: *Editor) void {
 }
 
 pub fn clearScreen(_: *const Editor) !void {
-    try stdout.writeAll(ansi.clear_screen ++ ansi.cursor_top);
-    try stdout.flush();
+    try stdio.stdout.writeAll(ansi.clear_screen ++ ansi.cursor_top);
+    try stdio.stdout.flush();
 }
 
 pub fn refreshScreen(self: *Editor) !void {
@@ -138,8 +138,8 @@ pub fn refreshScreen(self: *Editor) !void {
 
     try self.append_buffer.appendSlice(self.allocator, ansi.cursor_show);
 
-    try stdout.writeAll(self.append_buffer.items);
-    try stdout.flush();
+    try stdio.stdout.writeAll(self.append_buffer.items);
+    try stdio.stdout.flush();
 
     self.append_buffer.clearRetainingCapacity();
 }
@@ -165,8 +165,8 @@ pub fn processKeypress(self: *Editor, quit: *bool) !void {
             }
 
             quit.* = true;
-            try stdout.writeAll(ansi.clear_screen ++ ansi.cursor_top);
-            try stdout.flush();
+            try stdio.stdout.writeAll(ansi.clear_screen ++ ansi.cursor_top);
+            try stdio.stdout.flush();
         },
         .ctrl_s => try self.save(),
         .ctrl_f => try self.find(),
@@ -206,11 +206,11 @@ pub fn openFile(self: *Editor, filename: []const u8) !void {
 
     try self.selectSyntaxHighlight();
 
-    const file = try std.fs.cwd().openFile(filename, .{ .mode = .read_only });
-    defer file.close();
+    const file = try std.Io.Dir.cwd().openFile(self.io, filename, .{ .mode = .read_only });
+    defer file.close(self.io);
 
     var file_buffer: [512]u8 = undefined;
-    var file_reader = file.reader(&file_buffer);
+    var file_reader = file.reader(self.io, &file_buffer);
     const reader = &file_reader.interface;
 
     var write_buffer: [512]u8 = undefined;
@@ -227,7 +227,7 @@ pub fn openFile(self: *Editor, filename: []const u8) !void {
 
 pub fn setStatusMessage(self: *Editor, comptime fmt: []const u8, args: anytype) !void {
     self.status_msg = try std.fmt.bufPrint(&self.status_msg_buffer, fmt, args);
-    self.status_msg_time = std.time.timestamp();
+    self.status_msg_time = std.Io.Timestamp.now(self.io, .real).toMilliseconds();
 }
 
 fn selectSyntaxHighlight(self: *Editor) !void {
@@ -266,11 +266,11 @@ fn save(self: *Editor) !void {
     const buffer = try self.rowsToString();
     defer self.allocator.free(buffer);
 
-    const file = try std.fs.cwd().createFile(filename, .{ .truncate = false });
-    defer file.close();
+    const file = try std.Io.Dir.cwd().createFile(self.io, filename, .{ .truncate = false });
+    defer file.close(self.io);
 
-    try linux.ftruncate(file.handle, buffer.len);
-    try file.writeAll(buffer);
+    try linux.ftruncate(file.handle, @intCast(buffer.len));
+    try file.writeStreamingAll(self.io, buffer);
     self.dirty = 0;
 
     try self.setStatusMessage("{d} bytes written to disk", .{buffer.len});
@@ -797,14 +797,14 @@ fn drawStatusBar(self: *Editor) !void {
 fn drawMessageBar(self: *Editor) !void {
     try self.append_buffer.appendSlice(self.allocator, ansi.clear_line);
     const len = @min(self.status_msg.len, self.screen.cols);
-    if (std.time.timestamp() - self.status_msg_time < 5) {
+    if (std.Io.Timestamp.now(self.io, .real).toMilliseconds() - self.status_msg_time < 5) {
         try self.append_buffer.appendSlice(self.allocator, self.status_msg[0..len]);
     }
 }
 
 fn readKey() !Key {
     while (true) {
-        const char = stdin.takeByte() catch |err| blk: {
+        const char = stdio.stdin.takeByte() catch |err| blk: {
             break :blk switch (err) {
                 error.ReadFailed => return err,
                 error.EndOfStream => continue,
@@ -813,13 +813,13 @@ fn readKey() !Key {
 
         if (char == ansi.esc_seq[0]) {
             var seq: [3]u8 = undefined;
-            seq[0] = stdin.takeByte() catch return @enumFromInt(ansi.esc[0]);
-            seq[1] = stdin.takeByte() catch return @enumFromInt(ansi.esc[0]);
+            seq[0] = stdio.stdin.takeByte() catch return @enumFromInt(ansi.esc[0]);
+            seq[1] = stdio.stdin.takeByte() catch return @enumFromInt(ansi.esc[0]);
 
             switch (seq[0]) {
                 '[' => switch (seq[1]) {
                     '0'...'9' => {
-                        seq[2] = try stdin.takeByte();
+                        seq[2] = try stdio.stdin.takeByte();
                         if (seq[2] == '~') {
                             switch (seq[1]) {
                                 '1', '7' => return .home,
@@ -855,8 +855,8 @@ fn readKey() !Key {
 }
 
 fn getCursorPosition() !Screen {
-    try stdout.writeAll(ansi.cursor_position);
-    try stdout.flush();
+    try stdio.stdout.writeAll(ansi.cursor_position);
+    try stdio.stdout.flush();
 
     var buffer: [32]u8 = undefined;
     var array = std.ArrayListUnmanaged(u8).initBuffer(&buffer);

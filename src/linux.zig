@@ -51,6 +51,7 @@ pub fn getWindowSize() !WinSize {
     };
 }
 
-pub fn ftruncate(fd: std.fs.File.Handle, length: u64) !void {
-    try posix.ftruncate(fd, length);
+pub fn ftruncate(fd: std.Io.File.Handle, length: i64) !void {
+    const result: isize = @bitCast(std.os.linux.ftruncate(fd, length));
+    if (result == -1) return error.FTruncateError;
 }

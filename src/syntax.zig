@@ -82,6 +82,7 @@ pub const highlight_db: []const Syntax = &.{ .{
         "var",
         "if",
         "else",
+        "defer",
         "try",
         "catch",
         "comptime",
